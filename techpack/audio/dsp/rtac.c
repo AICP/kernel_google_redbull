@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2012-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2021, The Linux Foundation. All rights reserved.
  */
 
 #include <linux/fs.h>
@@ -882,7 +882,7 @@ int send_adm_apr(void *buf, u32 opcode)
 	mutex_unlock(&rtac_adm_apr_mutex);
 
 	result = adm_apr_send_pkt((uint32_t *)rtac_adm_buffer,
-			NULL, port_idx, copp_idx);
+			NULL, port_idx, copp_idx, adm_params.opcode);
 
 	mutex_lock(&rtac_adm_apr_mutex);
 	if (opcode == ADM_CMD_GET_PP_PARAMS_V5) {
@@ -935,6 +935,12 @@ void rtac_set_asm_handle(u32 session_id, void *handle)
 {
 	pr_debug("%s\n", __func__);
 
+	if (session_id >= (ASM_ACTIVE_STREAMS_ALLOWED + 1)) {
+		pr_err_ratelimited("%s: Invalid Session = %d\n",
+				 __func__, session_id);
+		return;
+	}
+
 	mutex_lock(&rtac_asm_apr_mutex);
 	rtac_asm_apr_data[session_id].apr_handle = handle;
 	mutex_unlock(&rtac_asm_apr_mutex);
@@ -943,6 +949,12 @@ void rtac_set_asm_handle(u32 session_id, void *handle)
 bool rtac_make_asm_callback(u32 session_id, uint32_t *payload,
 	u32 payload_size)
 {
+	if (session_id >= (ASM_ACTIVE_STREAMS_ALLOWED + 1)) {
+		pr_err_ratelimited("%s: Invalid Session = %d\n",
+				 __func__, session_id);
+		return false;
+	}
+
 	if (atomic_read(&rtac_asm_apr_data[session_id].cmd_state) != 1)
 		return false;
 

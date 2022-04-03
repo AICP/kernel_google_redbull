@@ -136,7 +136,7 @@ int fuse_do_open(struct fuse_conn *fc, u64 nodeid, struct file *file,
 		if (!err) {
 			ff->fh = outarg.fh;
 			ff->open_flags = outarg.open_flags;
-
+			fuse_passthrough_setup(fc, ff, &outarg);
 		} else if (err != -ENOSYS || isdir) {
 			fuse_file_free(ff);
 			return err;
@@ -178,12 +178,11 @@ void fuse_finish_open(struct inode *inode, struct file *file)
 
 	if (ff->open_flags & FOPEN_DIRECT_IO)
 		file->f_op = &fuse_direct_io_file_operations;
-	if (!(ff->open_flags & FOPEN_KEEP_CACHE))
-		invalidate_inode_pages2(inode->i_mapping);
 	if (ff->open_flags & FOPEN_STREAM)
 		stream_open(inode, file);
 	else if (ff->open_flags & FOPEN_NONSEEKABLE)
 		nonseekable_open(inode, file);
+
 	if (fc->atomic_o_trunc && (file->f_flags & O_TRUNC)) {
 		struct fuse_inode *fi = get_fuse_inode(inode);
 
@@ -191,10 +190,14 @@ void fuse_finish_open(struct inode *inode, struct file *file)
 		fi->attr_version = ++fc->attr_version;
 		i_size_write(inode, 0);
 		spin_unlock(&fc->lock);
+		truncate_pagecache(inode, 0);
 		fuse_invalidate_attr(inode);
 		if (fc->writeback_cache)
 			file_update_time(file);
+	} else if (!(ff->open_flags & FOPEN_KEEP_CACHE)) {
+		invalidate_inode_pages2(inode->i_mapping);
 	}
+
 	if ((file->f_mode & FMODE_WRITE) && fc->writeback_cache)
 		fuse_link_write_file(file);
 }
@@ -257,6 +260,8 @@ void fuse_release_common(struct file *file, bool isdir)
 	struct fuse_file *ff = file->private_data;
 	struct fuse_req *req = ff->reserved_req;
 	int opcode = isdir ? FUSE_RELEASEDIR : FUSE_RELEASE;
+
+	fuse_passthrough_release(&ff->passthrough);
 
 	fuse_prepare_release(ff, file->f_flags, opcode);
 
@@ -927,6 +932,7 @@ static ssize_t fuse_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 {
 	struct inode *inode = iocb->ki_filp->f_mapping->host;
 	struct fuse_conn *fc = get_fuse_conn(inode);
+	struct fuse_file *ff = iocb->ki_filp->private_data;
 
 	/*
 	 * In auto invalidate mode, always update attributes on read.
@@ -941,6 +947,8 @@ static ssize_t fuse_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 			return err;
 	}
 
+	if (ff->passthrough.filp)
+		return fuse_passthrough_read_iter(iocb, to);
 	return generic_file_read_iter(iocb, to);
 }
 
@@ -1184,6 +1192,10 @@ static ssize_t fuse_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	struct inode *inode = mapping->host;
 	ssize_t err;
 	loff_t endbyte = 0;
+	struct fuse_file *ff = file->private_data;
+
+	if (ff->passthrough.filp)
+		return fuse_passthrough_write_iter(iocb, from);
 
 	if (get_fuse_conn(inode)->writeback_cache) {
 		/* Update size (EOF optimization) and mode (SUID clearing) */
@@ -2084,6 +2096,11 @@ static const struct vm_operations_struct fuse_file_vm_ops = {
 
 static int fuse_file_mmap(struct file *file, struct vm_area_struct *vma)
 {
+	struct fuse_file *ff = file->private_data;
+
+	if (ff->passthrough.filp)
+		return fuse_passthrough_mmap(file, vma);
+
 	if ((vma->vm_flags & VM_SHARED) && (vma->vm_flags & VM_MAYWRITE))
 		fuse_link_write_file(file);
 

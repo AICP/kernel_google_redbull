@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Copyright (c) 2018-2020, The Linux Foundation. All rights reserved.*/
+/* Copyright (c) 2018-2021, The Linux Foundation. All rights reserved.*/
 
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -33,6 +33,8 @@
 			       __func__, ##__VA_ARGS__); \
 } while (0)
 
+#define MHI_NETDEV_NAPI_POLL_WEIGHT (64)
+
 #else
 
 #define MSG_VERB(fmt, ...) do { \
@@ -41,6 +43,8 @@
 		ipc_log_string(mhi_netdev->ipc_log, "[D][%s] " fmt, \
 			       __func__, ##__VA_ARGS__); \
 } while (0)
+
+#define MHI_NETDEV_NAPI_POLL_WEIGHT (128)
 
 #endif
 
@@ -721,7 +725,8 @@ static int mhi_netdev_enable_iface(struct mhi_netdev *mhi_netdev)
 	}
 
 	netif_napi_add(mhi_netdev->ndev, mhi_netdev->napi,
-		       mhi_netdev_poll, NAPI_POLL_WEIGHT);
+		       mhi_netdev_poll, MHI_NETDEV_NAPI_POLL_WEIGHT);
+
 	ret = register_netdev(mhi_netdev->ndev);
 	if (ret) {
 		MSG_ERR("Network device registration failed\n");
@@ -775,6 +780,7 @@ static void mhi_netdev_push_skb(struct mhi_netdev *mhi_netdev,
 			mhi_result->bytes_xferd, mhi_netdev->mru);
 	skb->dev = mhi_netdev->ndev;
 	skb->protocol = mhi_netdev_ip_type_trans(*(u8 *)mhi_buf->buf);
+	skb_set_mac_header(skb, 0);
 	netif_receive_skb(skb);
 }
 
@@ -810,6 +816,7 @@ static void mhi_netdev_xfer_dl_cb(struct mhi_device *mhi_dev,
 	/* we support chaining */
 	skb = alloc_skb(0, GFP_ATOMIC);
 	if (likely(skb)) {
+		skb_set_mac_header(skb, 0);
 		skb_add_rx_frag(skb, 0, mhi_buf->page, 0,
 				mhi_result->bytes_xferd, mhi_netdev->mru);
 		/* this is first on list */
