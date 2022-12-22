@@ -315,6 +315,15 @@ config QCOM_MEMORY_DUMP_V2
 	  of deadlocks or cpu hangs these dump regions are captured to
 	  give a snapshot of the system at the time of the crash.
 
+config MSM_DEBUG_LAR_UNLOCK
+	bool "MSM Debug LAR Unlock Support"
+	depends on QCOM_MEMORY_DUMP_V2
+	help
+	  This allows unlocking Core Debug lock to allow capture
+	  of upper 32 bits of program counter at the time of
+	  system crash. This is useful in getting correct crash
+	  location.
+
 config QCOM_SMEM_STATE
 	tristate
 
@@ -407,7 +416,7 @@ config MSM_REMOTEQDSS
 	  /sys/class/remoteqdss.
 
 config MSM_TZ_SMMU
-	depends on ARCH_MSM8953 || ARCH_QCS405
+	depends on ARCH_MSM8953 || ARCH_QCS405 || ARCH_MSM8917 || ARCH_MSM8937
 	tristate "Helper functions for SMMU configuration through TZ"
 	help
 	  Say 'Y' here for targets that need to call into TZ to configure
@@ -517,6 +526,15 @@ config QCOM_MINIDUMP
 	  Minidump would dump all registered entries, only when DLOAD mode
 	  is enabled.
 
+config QCOM_DYN_MINIDUMP_STACK
+	bool "QTI Dynamic Minidump Stack Registration Support"
+	depends on QCOM_MINIDUMP
+	help
+	  This enables minidump dynamic current stack registration feature.
+	  It allows current task stack to be available in minidump, for cases
+	  where CPU is unable to register it from IPI_CPU_STOP. The stack data
+	  can be used to unwind stack frames.
+
 config MINIDUMP_MAX_ENTRIES
 	int "Minidump Maximum num of entries"
 	default 200
@@ -588,6 +606,14 @@ config QCOM_WATCHDOG_V2
 	  watchdog times out. It allows for detection of cpu hangs and
 	  deadlocks. It does not run during the bootup process, so it will
 	  not catch any early lockups.
+
+config QCOM_INITIAL_LOGBUF
+	bool "QCOM save initial log_buf"
+	depends on QCOM_WATCHDOG_V2
+	help
+	  This enables to keep copy of initial log_buf at 100 second from
+	  bootup.It can help in debugging issues which are manifestation of
+	  failure during initial bootup.
 
 config QCOM_FORCE_WDOG_BITE_ON_PANIC
 	bool "QCOM force watchdog bite"
@@ -789,6 +815,13 @@ config QTI_L2_REUSE
 	  to let the power collapsed cluster's L2 cache usage by the active
 	  cluster cpu. Use sysfs interface to control enabling this feature.
 
+config QCOM_DCC
+	bool "QCOM Data Capture and Compare engine support"
+	help
+	  This option enables driver for Data Capture and Compare engine. DCC
+	  driver provides interface to configure DCC block and read back
+	  captured data from DCC's internal SRAM.
+
 config QTI_RPM_STATS_LOG
 	tristate "Qualcomm Technologies RPM Stats Driver"
 	depends on QCOM_RPMH || MSM_RPM_SMD
@@ -888,6 +921,16 @@ config QTI_CRYPTO_TZ
 	 performing hardware based file encryption. This means keys are
 	 programmed and managed through SCM calls to TZ where ICE driver
 	 will configure keys.
+
+config MSM_BAM_DMUX
+	bool "BAM Data Mux Driver"
+	depends on SPS
+	help
+	 Support Muxed Data Channels over BAM interface.
+	 BAM has a limited number of pipes.  This driver
+	 provides a means to support more logical channels
+	 via muxing than BAM could without muxing.
+
 endmenu
 
 config QCOM_HYP_CORE_CTL
@@ -949,3 +992,6 @@ config QCOM_SOCINFO
 	tristate "Qualcomm socinfo driver"
 	depends on SOC_BUS
 	default ARCH_QCOM
+
+source "drivers/soc/qcom/wcnss/Kconfig"
+

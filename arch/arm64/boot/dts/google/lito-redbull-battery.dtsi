@@ -55,11 +55,12 @@
 			   "batt-id";
 	qcom,cl-feedback-on;
 	qcom,qg-ext-sns;
-	qcom,cl-max-increment = <5>;
-	qcom,cl-max-decrement = <10>;
+	qcom,cl-max-increment = <3>;
+	qcom,cl-max-decrement = <5>;
 	qcom,cl-min-limit = <500>;
 	qcom,cl-max-limit = <0>;
 	qcom,cl-min-delta-batt-soc = <10>;
+	google,cl-degrade = <50>;
 	qcom,cl-wt-enable;
 	qcom,vbatt-cutoff-mv = <3300>;
 	qcom,vbatt-low-mv = <3500>;
@@ -145,9 +146,6 @@
 		google,cv-debounce-cnt = <3>;
 		google,cv-tier-ov-cnt = <1>;
 		google,cv-tier-switch-cnt = <3>;
-		/* charging stats */
-		google,chg-stats-qual-time = <900>;
-		google,chg-stats-delta-soc = <15>;
 		/* resistance estimation */
 		google,res-temp-hi = <390>;
 		google,res-temp-lo = <350>;
@@ -169,7 +167,7 @@
 		google,rl_soc-limits = <20 30 40 50 60 70 90 100>;
 		google,rl_soc-rates =  <25 26 27 28 29 28 27 22>;
 		/* rest charging */
-		google,chg-rest-rate = <8>;
+		google,chg-rest-rate = <15>;
 		google,chg-rest-soc = <80>;
 
 		/* battery history */
@@ -181,6 +179,9 @@
 		google,bd-trickle-recharge-soc = <80>;
 		/* Enable TRICKLE-DEFEND */
 		google,bd-trickle-enable;
+
+		google,temp-record-thr = <300 350 400>;
+		google,soc-record-thr = <90 90 95>;
 	};
 
 	google_charger: google,charger {
@@ -209,14 +210,13 @@
 		google,bd-resume-temp = <290>;
 		google,bd-resume-soc = <50>;
 		google,bd-trigger-time = <21600>; /* 6 hours */
-		google,bd-trigger-temp = <320>;
+		google,bd-trigger-temp = <350>;
 		google,bd-trigger-voltage = <4320000>;
 		google,bd-recharge-voltage = <4300000>;
 		google,bd-drainto-soc = <80>;
 		google,bd-recharge-soc = <79>;
 		/* Enable TEMP-DEFEND */
 		google,bd-temp-enable;
-		/* Set dry_run */
 		google,bd-temp-dry-run;
 	};
 

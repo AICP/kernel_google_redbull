@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2012-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2021, The Linux Foundation. All rights reserved.
  */
 #include <linux/slab.h>
 #include "msm_venc.h"
@@ -945,6 +945,15 @@ static struct msm_vidc_ctrl msm_venc_ctrls[] = {
 		.step = 1,
 	},
 	{
+		.id = V4L2_CID_MPEG_VIDEO_H264_CHROMA_QP_INDEX_OFFSET,
+		.name = "Chroma QP Index Offset",
+		.type = V4L2_CTRL_TYPE_INTEGER,
+		.minimum = -12,
+		.maximum = 0,
+		.default_value = 0,
+		.step = 1,
+	},
+	{
 		.id = V4L2_CID_MPEG_VIDEO_VBV_DELAY,
 		.name = "Set Vbv Delay",
 		.type = V4L2_CTRL_TYPE_INTEGER,
@@ -1104,26 +1113,6 @@ u32 v4l2_to_hfi_flip(struct msm_vidc_inst *inst)
 	return flip;
 }
 
-inline bool vidc_scalar_enabled(struct msm_vidc_inst *inst)
-{
-	struct v4l2_format *f;
-	u32 output_height, output_width, input_height, input_width;
-	bool scalar_enable = false;
-
-	f = &inst->fmts[OUTPUT_PORT].v4l2_fmt;
-	output_height = f->fmt.pix_mp.height;
-	output_width = f->fmt.pix_mp.width;
-	f = &inst->fmts[INPUT_PORT].v4l2_fmt;
-	input_height = f->fmt.pix_mp.height;
-	input_width = f->fmt.pix_mp.width;
-
-	if (output_height != input_height || output_width != input_width)
-		scalar_enable = true;
-
-	return scalar_enable;
-}
-
-
 static int msm_venc_set_csc(struct msm_vidc_inst *inst,
 					u32 color_primaries, u32 custom_matrix);
 
@@ -1216,6 +1205,7 @@ int msm_venc_inst_init(struct msm_vidc_inst *inst)
 	inst->buff_req.buffer[13].buffer_type = HAL_BUFFER_INTERNAL_RECON;
 	msm_vidc_init_buffer_size_calculators(inst);
 	inst->static_rotation_flip_enabled = false;
+	inst->hdr10_sei_enabled = false;
 	return rc;
 }
 
@@ -1710,6 +1700,7 @@ int msm_venc_s_ctrl(struct msm_vidc_inst *inst, struct v4l2_ctrl *ctrl)
 		u32 info_type = ((u32)ctrl->val >> 28) & 0xF;
 		u32 val = (ctrl->val & 0xFFFFFFF);
 
+		inst->hdr10_sei_enabled = true;
 		s_vpr_h(sid, "Ctrl:%d, HDR Info with value %u (%#X)",
 				info_type, val, ctrl->val);
 		switch (info_type) {
@@ -1978,6 +1969,7 @@ int msm_venc_s_ctrl(struct msm_vidc_inst *inst, struct v4l2_ctrl *ctrl)
 	case V4L2_CID_MPEG_VIDC_VENC_RC_TIMESTAMP_DISABLE:
 	case V4L2_CID_MPEG_VIDEO_VBV_DELAY:
 	case V4L2_CID_MPEG_VIDC_VENC_BITRATE_SAVINGS:
+	case V4L2_CID_MPEG_VIDEO_H264_CHROMA_QP_INDEX_OFFSET:
 	case V4L2_CID_MPEG_VIDC_SUPERFRAME:
 		s_vpr_h(sid, "Control set: ID : 0x%x Val : %d\n",
 			ctrl->id, ctrl->val);
@@ -3216,6 +3208,10 @@ int msm_venc_set_slice_control_mode(struct msm_vidc_inst *inst)
 
 	/* Update Slice Config */
 	mb_per_frame = NUM_MBS_PER_FRAME(output_height, output_width);
+	if (codec == V4L2_PIX_FMT_HEVC)
+		mb_per_frame =
+			NUM_MBS_PER_FRAME_HEVC(output_height, output_width);
+
 	mbps = NUM_MBS_PER_SEC(output_height, output_width, fps);
 
 	if (slice_mode == HFI_MULTI_SLICE_BY_MB_COUNT) {
@@ -3363,6 +3359,69 @@ int msm_venc_set_bitrate_savings_mode(struct msm_vidc_inst *inst)
 	rc = call_hfi_op(hdev, session_set_property, inst->session,
 		HFI_PROPERTY_PARAM_VENC_BITRATE_SAVINGS, &enable,
 		sizeof(enable));
+	if (rc)
+		s_vpr_e(inst->sid, "%s: set property failed\n", __func__);
+
+	return rc;
+}
+
+int msm_venc_set_chroma_qp_offset(struct msm_vidc_inst *inst)
+{
+	int rc = 0;
+	struct hfi_device *hdev;
+	struct v4l2_ctrl *chr;
+	struct v4l2_ctrl *ctrl_cs;
+	struct hfi_chroma_qp_offset chroma_qp;
+	struct v4l2_format *f;
+	u32 codec, width, height, mbpf;
+
+	if (!inst || !inst->core) {
+		d_vpr_e("%s: invalid params %pK\n", __func__, inst);
+		return -EINVAL;
+	}
+	hdev = inst->core->device;
+
+	chr = get_ctrl(inst, V4L2_CID_MPEG_VIDEO_H264_CHROMA_QP_INDEX_OFFSET);
+	if (chr->val != -12)
+		return 0;
+
+	f = &inst->fmts[INPUT_PORT].v4l2_fmt;
+	width = f->fmt.pix_mp.width;
+	height = f->fmt.pix_mp.height;
+	mbpf = NUM_MBS_PER_FRAME(width, height);
+	ctrl_cs = get_ctrl(inst, V4L2_CID_MPEG_VIDC_VIDEO_COLOR_SPACE);
+	codec = get_v4l2_codec(inst);
+
+	/**
+	 * Set chroma qp offset to HEVC & VBR_CFR rc
+	 * 10 bit: only BT2020
+	 *  8 bit: only mbpf >= num_mbs(7680, 3840)
+	 */
+	if (codec != V4L2_PIX_FMT_HEVC ||
+		inst->rc_type != V4L2_MPEG_VIDEO_BITRATE_MODE_VBR)
+		return 0;
+
+	if ((inst->bit_depth == MSM_VIDC_BIT_DEPTH_10 &&
+		ctrl_cs->val != MSM_VIDC_BT2020) ||
+		(inst->bit_depth == MSM_VIDC_BIT_DEPTH_8 &&
+		mbpf < NUM_MBS_PER_FRAME(7680, 3840)))
+		return 0;
+
+	/**
+	 * client sets one chroma offset only in range [-12, 0]
+	 * firmware expects chroma cb offset and cr offset in
+	 * range [0, 12], firmware subtracts 12 from driver set values.
+	 */
+	chroma_qp.chroma_offset = (chr->val + 12) << 16 | (chr->val + 12);
+	s_vpr_h(inst->sid, "%s: %x\n", __func__, chroma_qp.chroma_offset);
+
+	/* TODO: Remove this check after firmware support added for 8-bit */
+	if (inst->bit_depth == MSM_VIDC_BIT_DEPTH_8)
+		return 0;
+
+	rc = call_hfi_op(hdev, session_set_property, inst->session,
+		HFI_PROPERTY_PARAM_HEVC_PPS_CB_CR_OFFSET, &chroma_qp,
+		sizeof(chroma_qp));
 	if (rc)
 		s_vpr_e(inst->sid, "%s: set property failed\n", __func__);
 
@@ -4330,7 +4389,8 @@ int msm_venc_set_hdr_info(struct msm_vidc_inst *inst)
 	}
 	hdev = inst->core->device;
 
-	if (get_v4l2_codec(inst) != V4L2_PIX_FMT_HEVC)
+	if (get_v4l2_codec(inst) != V4L2_PIX_FMT_HEVC ||
+		!inst->hdr10_sei_enabled)
 		return 0;
 
 	profile = get_ctrl(inst, V4L2_CID_MPEG_VIDEO_HEVC_PROFILE);
@@ -4712,6 +4772,9 @@ int msm_venc_set_properties(struct msm_vidc_inst *inst)
 	if (rc)
 		goto exit;
 	rc = msm_venc_set_video_csc(inst);
+	if (rc)
+		goto exit;
+	rc = msm_venc_set_chroma_qp_offset(inst);
 	if (rc)
 		goto exit;
 	rc = msm_venc_set_blur_resolution(inst);

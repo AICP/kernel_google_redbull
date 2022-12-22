@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2017-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2021, The Linux Foundation. All rights reserved.
  */
 
 #include <linux/kernel.h>
@@ -22,6 +22,8 @@
 #include <linux/clk/qcom.h>
 
 #include <dt-bindings/regulator/qcom,rpmh-regulator-levels.h>
+#include "../../regulator/internal.h"
+#include "gdsc-debug.h"
 
 /* GDSCR */
 #define PWR_ON_MASK		BIT(31)
@@ -146,6 +148,9 @@ static int gdsc_is_enabled(struct regulator_dev *rdev)
 	if (!sc->toggle_logic)
 		return !sc->resets_asserted;
 
+	if (sc->skip_disable_before_enable)
+		return false;
+
 	if (sc->parent_regulator) {
 		/*
 		 * The parent regulator for the GDSC is required to be on to
@@ -208,6 +213,9 @@ static int gdsc_enable(struct regulator_dev *rdev)
 	struct gdsc *sc = rdev_get_drvdata(rdev);
 	uint32_t regval, hw_ctrl_regval = 0x0;
 	int i, ret = 0;
+
+	if (sc->skip_disable_before_enable)
+		return 0;
 
 	if (sc->parent_regulator) {
 		ret = regulator_set_voltage(sc->parent_regulator,
@@ -367,7 +375,6 @@ static int gdsc_enable(struct regulator_dev *rdev)
 		clk_disable_unprepare(sc->clocks[sc->root_clk_idx]);
 
 	sc->is_gdsc_enabled = true;
-	sc->skip_disable_before_enable = false;
 end:
 	if (ret && sc->bus_handle) {
 		msm_bus_scale_client_update_request(sc->bus_handle, 0);
@@ -385,16 +392,6 @@ static int gdsc_disable(struct regulator_dev *rdev)
 	struct gdsc *sc = rdev_get_drvdata(rdev);
 	uint32_t regval;
 	int i, ret = 0;
-
-	/*
-	 * Protect GDSC against late_init disabling when the GDSC is enabled
-	 * by an entity outside external to HLOS.
-	 */
-	if (sc->skip_disable_before_enable) {
-		dev_dbg(&rdev->dev, "Skip Disabling: %s\n", sc->rdesc.name);
-		sc->skip_disable_before_enable = false;
-		return 0;
-	}
 
 	if (sc->force_root_en)
 		clk_prepare_enable(sc->clocks[sc->root_clk_idx]);
@@ -582,6 +579,19 @@ static int gdsc_set_mode(struct regulator_dev *rdev, unsigned int mode)
 		 */
 		gdsc_mb(sc);
 		udelay(1);
+
+		/*
+		 * While switching from HW to SW mode, HW may be busy
+		 * updating internal required signals. Polling for PWR_ON
+		 * ensures that the GDSC switches to SW mode before software
+		 * starts to use SW mode.
+		 */
+		if (sc->is_gdsc_enabled) {
+			ret = poll_gdsc_status(sc, ENABLED);
+			if (ret)
+				dev_err(&rdev->dev, "%s enable timed out\n",
+					sc->rdesc.name);
+		}
 		break;
 	default:
 		ret = -EINVAL;
@@ -607,12 +617,37 @@ static struct regulator_ops gdsc_ops = {
 	.get_mode = gdsc_get_mode,
 };
 
-static const struct regmap_config gdsc_regmap_config = {
+static struct regmap_config gdsc_regmap_config = {
 	.reg_bits   = 32,
 	.reg_stride = 4,
 	.val_bits   = 32,
+	.max_register = 0x8,
 	.fast_io    = true,
 };
+
+void gdsc_debug_print_regs(struct regulator *regulator)
+{
+	struct gdsc *sc = rdev_get_drvdata(regulator->rdev);
+	uint32_t regvals[3] = {0};
+	int ret;
+
+	if (!sc) {
+		pr_err("Failed to get GDSC Handle\n");
+		return;
+	}
+
+	ret = regmap_bulk_read(sc->regmap, REG_OFFSET, regvals,
+			gdsc_regmap_config.max_register ? 3 : 1);
+	if (ret) {
+		pr_err("Failed to read %s registers\n", sc->rdesc.name);
+		return;
+	}
+
+	pr_info("Dumping %s Registers:\n", sc->rdesc.name);
+	pr_info("GDSCR: 0x%.8x CFG: 0x%.8x CFG2: 0x%.8x\n",
+			regvals[0], regvals[1], regvals[2]);
+}
+EXPORT_SYMBOL(gdsc_debug_print_regs);
 
 static int gdsc_parse_dt_data(struct gdsc *sc, struct device *dev,
 				struct regulator_init_data **init_data)
@@ -723,6 +758,9 @@ static int gdsc_get_resources(struct gdsc *sc, struct platform_device *pdev)
 	sc->gdscr = devm_ioremap(dev, res->start, resource_size(res));
 	if (sc->gdscr == NULL)
 		return -ENOMEM;
+
+	if (of_property_read_bool(dev->of_node, "qcom,no-config-gdscr"))
+		gdsc_regmap_config.max_register = 0;
 
 	sc->regmap = devm_regmap_init_mmio(dev, sc->gdscr, &gdsc_regmap_config);
 	if (!sc->regmap) {

@@ -187,6 +187,7 @@ static int chg_therm_update_fcc(struct chg_drv *chg_drv);
 static void chg_reset_termination_data(struct chg_drv *chg_drv);
 static int chg_vote_input_suspend(struct chg_drv *chg_drv, char *voter,
 				  bool suspend);
+static int chg_work_read_soc(struct power_supply *bat_psy, int *soc);
 
 struct bd_data {
 	u32 bd_trigger_voltage;	/* also recharge upper bound */
@@ -269,6 +270,7 @@ struct chg_drv {
 	int egain_retries;
 	u32 snk_pdo[PDO_MAX_OBJECTS];
 	unsigned int nr_snk_pdo;
+	bool is_full;
 
 	/* retail & battery defender */
 	struct delayed_work bd_work;
@@ -568,6 +570,7 @@ static int chg_set_charger(struct power_supply *chg_psy, int fv_uv, int cc_max)
 static int chg_update_charger(struct chg_drv *chg_drv, int fv_uv, int cc_max)
 {
 	int rc = 0;
+	int chg_done = 0, soc = 0;
 	struct power_supply *chg_psy = chg_drv->chg_psy;
 
 	if (chg_drv->fv_uv != fv_uv || chg_drv->cc_max != cc_max) {
@@ -591,6 +594,25 @@ static int chg_update_charger(struct chg_drv *chg_drv, int fv_uv, int cc_max)
 
 			chg_drv->cc_max = cc_max;
 			chg_drv->fv_uv = fv_uv;
+
+			chg_done = GPSY_GET_PROP(chg_drv->chg_psy,
+						 POWER_SUPPLY_PROP_CHARGE_DONE);
+			rc = chg_work_read_soc(chg_drv->bat_psy, &soc);
+			/* reset charger if status full but soc < 100%,
+			 * except recharge */
+			if (chg_done == 1) {
+				if (soc == chg_drv->charge_stop_level) {
+					chg_drv->is_full = true;
+				} else if (!chg_drv->is_full) {
+					pr_info("MSC_RESET: charge full in unexpected soc. reset chg\n");
+					vote(chg_drv->msc_chg_disable_votable,
+					     MSC_CHG_FULL_VOTER, true, 0);
+					vote(chg_drv->msc_chg_disable_votable,
+					     MSC_CHG_FULL_VOTER, false, 0);
+				}
+			} else {
+				chg_drv->is_full = false;
+			}
 		}
 	}
 
@@ -1129,9 +1151,11 @@ static void chg_work_adapter_details(union gbms_ce_adapter_details *ad,
 static int chg_work_roundtrip(struct chg_drv *chg_drv,
 			      union gbms_charger_state *chg_state)
 {
+	struct power_supply *chg_psy = chg_drv->chg_psy;
+	struct power_supply *wlc_psy = chg_drv->wlc_psy;
 	int fv_uv = -1, cc_max = -1, update_interval, rc;
 
-	rc = gbms_read_charger_state(chg_state, chg_drv->chg_psy);
+	rc = gbms_read_charger_state(chg_state, chg_psy, wlc_psy);
 	if (rc < 0)
 		return rc;
 
@@ -1222,6 +1246,10 @@ static void chg_update_charging_state(struct chg_drv *chg_drv,
 	if (disable_charging != chg_drv->disable_charging) {
 		pr_info("MSC_CHG disable_charging %d -> %d",
 			chg_drv->disable_charging, disable_charging);
+
+		GPSY_SET_PROP(chg_drv->chg_psy,
+			      POWER_SUPPLY_PROP_SAFETY_TIMER_ENABLE,
+			      !disable_charging);
 
 		/* voted but not applied since msc_interval_votable <= 0 */
 		vote(chg_drv->msc_fcc_votable,
@@ -1404,11 +1432,11 @@ static int bd_update_stats(struct bd_data *bd_state,
 	/* exit and entry criteria on temperature while connected */
 	temp_avg = bd_state->temp_sum / bd_state->time_sum;
 	if (triggered && temp <= bd_state->bd_resume_abs_temp) {
-		pr_info("MSC_BD: resume time_sum=%lld, temp_sum=%lld, temp_avg=%d\n",
+		pr_info("MSC_BD: resume time_sum=%ld, temp_sum=%lld, temp_avg=%lld\n",
 			bd_state->time_sum, bd_state->temp_sum, temp_avg);
 		bd_reset(bd_state);
 	} else if (!triggered && temp_avg >= bd_state->bd_trigger_temp) {
-		pr_info("MSC_BD: trigger time_sum=%lld, temp_sum=%lld, temp_avg=%d\n",
+		pr_info("MSC_BD: trigger time_sum=%ld, temp_sum=%lld, temp_avg=%lld\n",
 			bd_state->time_sum, bd_state->temp_sum, temp_avg);
 		bd_state->triggered = 1;
 	}
@@ -1462,7 +1490,7 @@ static int bd_recharge_logic(struct bd_data *bd_state, int val)
 }
 
 /* ignore the failure to set CAPACITY: it might not be implemented */
-static int bd_batt_set_soc(struct chg_drv *chg_drv, int soc)
+static int bd_batt_set_soc(struct chg_drv *chg_drv , int soc)
 {
 	const bool freeze = soc >= 0;
 	int rc;
@@ -1605,7 +1633,7 @@ static void bd_work(struct work_struct *work)
 				delta_time, bd_state->bd_resume_time,
 				temp, bd_state->bd_resume_temp);
 
-			bd_state->triggered = triggered;
+			bd_reset(&chg_drv->bd_state);
 			goto bd_rerun;
 		}
 	}
@@ -1659,14 +1687,8 @@ static int chg_start_bd_work(struct chg_drv *chg_drv)
 
 	/* always track disconnect time */
 	if (!bd_state->disconnect_time) {
-		int ret;
-
-		ret = bd_batt_set_state(chg_drv, false, -1);
-		if (ret < 0) {
-			pr_err("MSC_BD set_batt_state (%d)\n", ret);
-			mutex_unlock(&chg_drv->bd_lock);
-			return ret;
-		}
+		gbms_temp_defend_dry_run(true,
+					 chg_drv->bd_state.bd_temp_dry_run);
 
 		bd_state->disconnect_time = get_boot_sec();
 	}
@@ -1998,7 +2020,7 @@ update_charger:
 
 rerun_error:
 	success = schedule_delayed_work(&chg_drv->chg_work,
-					CHG_WORK_ERROR_RETRY_MS);
+				msecs_to_jiffies(CHG_WORK_ERROR_RETRY_MS));
 
 	/* no need to reschedule the pending after an error
 	 * NOTE: rc is the return code from battery properties
@@ -2079,7 +2101,7 @@ static int chg_init_chg_profile(struct chg_drv *chg_drv)
 		chg_drv->cc_update_interval = DRV_DEFAULTCC_UPDATE_INTERVAL;
 
 	/* when set will reduce cc_max by
-	 * cc_max = cc_max * (1000 - chg_cc_tolerance) / 1000;
+	 * 	cc_max = cc_max * (1000 - chg_cc_tolerance) / 1000;
 	 *
 	 * this adds a "safety" margin for C rates if the charger doesn't do it.
 	 */
@@ -2188,7 +2210,7 @@ static int chg_init_chg_profile(struct chg_drv *chg_drv)
 	return 0;
 }
 
-static ssize_t charge_stop_level_show(struct device *dev,
+static ssize_t show_charge_stop_level(struct device *dev,
 				      struct device_attribute *attr, char *buf)
 {
 	struct chg_drv *chg_drv = dev_get_drvdata(dev);
@@ -2196,7 +2218,7 @@ static ssize_t charge_stop_level_show(struct device *dev,
 	return scnprintf(buf, PAGE_SIZE, "%d\n", chg_drv->charge_stop_level);
 }
 
-static ssize_t charge_stop_level_store(struct device *dev,
+static ssize_t set_charge_stop_level(struct device *dev,
 				     struct device_attribute *attr,
 				     const char *buf, size_t count)
 {
@@ -2224,9 +2246,11 @@ static ssize_t charge_stop_level_store(struct device *dev,
 	return count;
 }
 
-static DEVICE_ATTR_RW(charge_stop_level);
+static DEVICE_ATTR(charge_stop_level, 0660, show_charge_stop_level,
+					    set_charge_stop_level);
 
-static ssize_t charge_start_level_show(struct device *dev,
+static ssize_t
+show_charge_start_level(struct device *dev,
 			struct device_attribute *attr, char *buf)
 {
 	struct chg_drv *chg_drv = dev_get_drvdata(dev);
@@ -2234,7 +2258,7 @@ static ssize_t charge_start_level_show(struct device *dev,
 	return scnprintf(buf, PAGE_SIZE, "%d\n", chg_drv->charge_start_level);
 }
 
-static ssize_t charge_start_level_store(struct device *dev,
+static ssize_t set_charge_start_level(struct device *dev,
 				      struct device_attribute *attr,
 				      const char *buf, size_t count)
 {
@@ -2262,7 +2286,8 @@ static ssize_t charge_start_level_store(struct device *dev,
 	return count;
 }
 
-static DEVICE_ATTR_RW(charge_start_level);
+static DEVICE_ATTR(charge_start_level, 0660,
+		   show_charge_start_level, set_charge_start_level);
 
 static ssize_t
 charge_disable_show(struct device *dev,
@@ -2661,6 +2686,40 @@ static ssize_t bd_temp_dry_run_store(struct device *dev,
 }
 
 static DEVICE_ATTR_RW(bd_temp_dry_run);
+
+static ssize_t bd_clear_store(struct device *dev, struct device_attribute *attr,
+			      const char *buf, size_t count)
+{
+	struct chg_drv *chg_drv = dev_get_drvdata(dev);
+	int ret = 0, val = 0;
+
+	ret = kstrtoint(buf, 0, &val);
+	if (ret < 0)
+		return ret;
+
+	if (!val)
+		return ret;
+
+	mutex_lock(&chg_drv->bd_lock);
+
+	ret = bd_batt_set_state(chg_drv, false, -1);
+	if (ret < 0)
+		pr_err("MSC_BD set_batt_state (%d)\n", ret);
+
+	bd_reset(&chg_drv->bd_state);
+
+	if (chg_drv->chg_psy)
+		power_supply_changed(chg_drv->chg_psy);
+
+	mutex_unlock(&chg_drv->bd_lock);
+
+	if (chg_drv->bat_psy)
+		power_supply_changed(chg_drv->bat_psy);
+
+	return count;
+}
+
+static DEVICE_ATTR_WO(bd_clear);
 
 /* TODO: now created in qcom code, create in chg_create_votables() */
 static int chg_find_votables(struct chg_drv *chg_drv)
@@ -3149,6 +3208,12 @@ static int chg_init_fs(struct chg_drv *chg_drv)
 		return ret;
 	}
 
+	ret = device_create_file(chg_drv->device, &dev_attr_bd_clear);
+	if (ret != 0) {
+		pr_err("Failed to create bd_clear files, ret=%d\n", ret);
+		return ret;
+	}
+
 	de = debugfs_create_dir("google_charger", 0);
 
 	if (!de)
@@ -3174,7 +3239,7 @@ static int chg_init_fs(struct chg_drv *chg_drv)
 	debugfs_create_file("pps_cc_tolerance", 0600, de,
 				chg_drv, &debug_pps_cc_tolerance_fops);
 
-	debugfs_create_u32("bd_triggered", 0644, de,
+	debugfs_create_u32("bd_triggered", S_IRUGO | S_IWUSR, de,
 			   &chg_drv->bd_state.triggered);
 	debugfs_create_file("bd_enabled", 0600, de, chg_drv, &bd_enabled_fops);
 

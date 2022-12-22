@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2012-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2021, The Linux Foundation. All rights reserved.
  */
 
 #include <asm/dma-iommu.h>
+#include <linux/dma-iommu.h>
 #include <linux/iommu.h>
 #include <linux/of.h>
 #include <linux/slab.h>
@@ -845,6 +846,7 @@ int read_platform_resources_from_drv_data(
 
 	res->vpu_ver = platform_data->vpu_ver;
 	res->ubwc_config = platform_data->ubwc_config;
+	res->max_inst_count = platform_data->max_inst_count;
 
 	return rc;
 
@@ -1011,6 +1013,13 @@ static int msm_vidc_setup_context_bank(struct msm_vidc_platform_resources *res,
 	}
 
 	 cb->domain = iommu_get_domain_for_dev(cb->dev);
+
+	/*
+	 * When memory is fragmented, below configuration increases the
+	 * possibility to get a mapping for buffer in the configured CB.
+	 */
+	if (!strcmp(cb->name, "venus_ns"))
+		iommu_dma_enable_best_fit_algo(cb->dev);
 
 	 /*
 	 * configure device segment size and segment boundary to ensure

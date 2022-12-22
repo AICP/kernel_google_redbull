@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2021, The Linux Foundation. All rights reserved.
  */
 
 #define pr_fmt(fmt)	"[drm:%s:%d] " fmt, __func__, __LINE__
@@ -105,12 +105,15 @@ static void _sde_core_perf_calc_doze_suspend(struct drm_crtc *crtc,
 	if (!old_perf)
 		return;
 
-	if (!perf->bw_ctl[SDE_POWER_HANDLE_DBUS_ID_LLCC] &&
-		!perf->max_per_pipe_ib[SDE_POWER_HANDLE_DBUS_ID_LLCC] &&
-		!perf->bw_ctl[SDE_POWER_HANDLE_DBUS_ID_EBI] &&
-		!perf->max_per_pipe_ib[SDE_POWER_HANDLE_DBUS_ID_EBI] &&
+	if (!perf->bw_ctl[SDE_POWER_HANDLE_DBUS_ID_MNOC] &&
+		!perf->max_per_pipe_ib[SDE_POWER_HANDLE_DBUS_ID_MNOC] &&
 		state->plane_mask) {
 
+		perf->bw_ctl[SDE_POWER_HANDLE_DBUS_ID_MNOC] =
+			old_perf->bw_ctl[SDE_POWER_HANDLE_DBUS_ID_MNOC];
+		perf->max_per_pipe_ib[SDE_POWER_HANDLE_DBUS_ID_MNOC] =
+			old_perf->max_per_pipe_ib
+					[SDE_POWER_HANDLE_DBUS_ID_MNOC];
 		perf->bw_ctl[SDE_POWER_HANDLE_DBUS_ID_LLCC] =
 			old_perf->bw_ctl[SDE_POWER_HANDLE_DBUS_ID_LLCC];
 		perf->max_per_pipe_ib[SDE_POWER_HANDLE_DBUS_ID_LLCC] =
@@ -119,6 +122,9 @@ static void _sde_core_perf_calc_doze_suspend(struct drm_crtc *crtc,
 			old_perf->bw_ctl[SDE_POWER_HANDLE_DBUS_ID_EBI];
 		perf->max_per_pipe_ib[SDE_POWER_HANDLE_DBUS_ID_EBI] =
 		  old_perf->max_per_pipe_ib[SDE_POWER_HANDLE_DBUS_ID_EBI];
+
+		if (!old_perf->core_clk_rate)
+			perf->core_clk_rate = old_perf->core_clk_rate;
 
 		for (i = 0; i < new_cstate->num_connectors; i++) {
 			conn = new_cstate->connectors[i];
@@ -130,13 +136,14 @@ static void _sde_core_perf_calc_doze_suspend(struct drm_crtc *crtc,
 				is_doze_suspend = true;
 		}
 
-		if (!is_doze_suspend && conn && c_conn) {
-			SDE_DEBUG("No BW, planes:%x dpms_mode:%d lpmode:%d\n",
+		if (!is_doze_suspend && conn && c_conn)
+			SDE_ERROR("No BW, planes:%x dpms_mode:%d lpmode:%d\n",
 				state->plane_mask, c_conn->dpms_mode,
 				sde_connector_get_lp(conn));
+		if (conn && c_conn)
 			SDE_EVT32(state->plane_mask, c_conn->dpms_mode,
-				sde_connector_get_lp(conn), SDE_EVTLOG_ERROR);
-		}
+				sde_connector_get_lp(conn), is_doze_suspend,
+				SDE_EVTLOG_ERROR);
 	}
 }
 
@@ -668,6 +675,10 @@ static void _sde_core_perf_crtc_update_bus(struct sde_kms *kms,
 
 	bus_ab_quota = max(bw_sum_of_intfs, kms->perf.perf_tune.min_bus_vote);
 	bus_ib_quota = perf.max_per_pipe_ib[bus_id];
+
+	if (!kms->perf.sde_rsc_available)
+		bus_ib_quota = max(SDE_POWER_HANDLE_ENABLE_BUS_IB_QUOTA,
+					bus_ib_quota);
 
 	if (kms->perf.perf_tune.mode == SDE_PERF_MODE_FIXED) {
 		bus_ab_quota = max(kms->perf.fix_core_ab_vote,

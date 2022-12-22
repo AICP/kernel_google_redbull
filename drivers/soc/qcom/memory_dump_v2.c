@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2014-2017, 2019-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2014-2017, 2019-2021, The Linux Foundation. All rights reserved.
  */
 
 #include <asm/cacheflush.h>
@@ -679,7 +679,7 @@ int msm_dump_data_register(enum msm_dump_table_ids id,
 
 	ret = register_dump_table_entry(id, entry);
 	if (!ret)
-		if (msm_dump_data_add_minidump(entry))
+		if (msm_dump_data_add_minidump(entry) < 0)
 			pr_err("Failed to add entry in Minidump table\n");
 
 	return ret;
@@ -755,14 +755,9 @@ static int init_memory_dump(void *dump_vaddr, phys_addr_t phys_addr,
 static int __init init_debug_lar_unlock(void)
 {
 	int ret;
-	uint32_t argument = 0;
 	struct scm_desc desc = {0};
 
-	if (!is_scm_armv8())
-		ret = scm_call(SCM_SVC_TZ, SCM_CMD_DEBUG_LAR_UNLOCK, &argument,
-			       sizeof(argument), NULL, 0);
-	else
-		ret = scm_call2(SCM_SIP_FNID(SCM_SVC_TZ,
+	ret = scm_call2(SCM_SIP_FNID(SCM_SVC_TZ,
 				SCM_CMD_DEBUG_LAR_UNLOCK), &desc);
 	if (ret)
 		pr_err("Core Debug Lock unlock failed, ret: %d\n", ret);
@@ -878,7 +873,7 @@ static int mem_dump_alloc(struct platform_device *pdev)
 		md_entry.size = size;
 		md_entry.id = id;
 		strlcpy(md_entry.name, child_node->name, sizeof(md_entry.name));
-		if (msm_minidump_add_region(&md_entry))
+		if (msm_minidump_add_region(&md_entry) < 0)
 			dev_err(&pdev->dev, "Mini dump entry failed id = %d\n",
 				id);
 

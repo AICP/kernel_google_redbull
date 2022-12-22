@@ -1601,6 +1601,7 @@ static void sec_ts_handle_coord_event(struct sec_ts_data *ts,
 		ts->offload.coords[t_id].major = ts->coord[t_id].major;
 		ts->offload.coords[t_id].minor = ts->coord[t_id].minor;
 		ts->offload.coords[t_id].pressure = ts->coord[t_id].z;
+		ts->offload.coords[t_id].rotation = 0;
 #endif
 
 		if ((ts->coord[t_id].ttype ==
@@ -1836,6 +1837,37 @@ static void sec_ts_handle_coord_event(struct sec_ts_data *ts,
 		input_err(true, &ts->client->dev,
 				"%s: tid(%d) is out of range\n",
 				__func__, t_id);
+
+	if (t_id < MAX_SUPPORT_TOUCH_COUNT + MAX_SUPPORT_HOVER_COUNT) {
+		if (ts->coord[t_id].action == SEC_TS_COORDINATE_ACTION_PRESS) {
+			input_dbg(false, &ts->client->dev,
+				"%s[P] tID:%d x:%d y:%d z:%d major:%d minor:%d tc:%d type:%X\n",
+				ts->dex_name,
+				t_id, ts->coord[t_id].x,
+				ts->coord[t_id].y, ts->coord[t_id].z,
+				ts->coord[t_id].major,
+				ts->coord[t_id].minor,
+				ts->touch_count,
+				ts->coord[t_id].ttype);
+
+		} else if (ts->coord[t_id].action ==
+			   SEC_TS_COORDINATE_ACTION_RELEASE) {
+			input_dbg(false, &ts->client->dev,
+				"%s[R] tID:%d mc:%d tc:%d lx:%d ly:%d v:%02X%02X cal:%02X(%02X) id(%d,%d) p:%d\n",
+				ts->dex_name,
+				t_id, ts->coord[t_id].mcount,
+				ts->touch_count,
+				ts->coord[t_id].x, ts->coord[t_id].y,
+				ts->plat_data->img_version_of_ic[2],
+				ts->plat_data->img_version_of_ic[3],
+				ts->cal_status, ts->nv, ts->tspid_val,
+				ts->tspicid_val,
+				ts->coord[t_id].palm_count);
+
+			ts->coord[t_id].mcount = 0;
+			ts->coord[t_id].palm_count = 0;
+		}
+	}
 }
 
 #ifdef SEC_TS_SUPPORT_CUSTOMLIB
@@ -1919,6 +1951,7 @@ static void sec_ts_populate_coordinate_channel(struct sec_ts_data *ts,
 		dc->coords[j].major = ts->offload.coords[j].major;
 		dc->coords[j].minor = ts->offload.coords[j].minor;
 		dc->coords[j].pressure = ts->offload.coords[j].pressure;
+		dc->coords[j].rotation = ts->offload.coords[j].rotation;
 		dc->coords[j].status = ts->offload.coords[j].status;
 	}
 }
@@ -2132,6 +2165,24 @@ static void sec_ts_populate_self_channel(struct sec_ts_data *ts,
 	}
 }
 
+static void sec_ts_populate_driver_status_channel(struct sec_ts_data *ts,
+					struct touch_offload_frame *frame,
+					int channel)
+{
+	struct TouchOffloadDriverStatus *ds =
+		(struct TouchOffloadDriverStatus *)frame->channel_data[channel];
+	memset(ds, 0, frame->channel_data_size[channel]);
+	ds->header.channel_type = (u32)CONTEXT_CHANNEL_TYPE_DRIVER_STATUS;
+	ds->header.channel_size = sizeof(struct TouchOffloadDriverStatus);
+
+	ds->contents.screen_state = 1;
+	ds->screen_state = (ts->power_status == SEC_TS_STATE_POWER_ON) ? 1 : 0;
+
+	/* Display refresh rate not currently available in this driver */
+	ds->display_refresh_rate = 60;
+	ds->contents.display_refresh_rate = 0;
+}
+
 static void sec_ts_populate_frame(struct sec_ts_data *ts,
 				struct touch_offload_frame *frame)
 {
@@ -2154,6 +2205,16 @@ static void sec_ts_populate_frame(struct sec_ts_data *ts,
 			sec_ts_populate_mutual_channel(ts, frame, i);
 		else if ((frame->channel_type[i] & TOUCH_SCAN_TYPE_SELF) != 0)
 			sec_ts_populate_self_channel(ts, frame, i);
+		else if ((frame->channel_type[i] ==
+			  CONTEXT_CHANNEL_TYPE_DRIVER_STATUS) != 0)
+			sec_ts_populate_driver_status_channel(ts, frame, i);
+		else if ((frame->channel_type[i] ==
+			  CONTEXT_CHANNEL_TYPE_STYLUS_STATUS) != 0) {
+			/* Stylus context is not required by this driver */
+			input_err(true, &ts->client->dev,
+				  "%s: Driver does not support stylus status",
+				  __func__);
+		}
 	}
 }
 
@@ -2189,7 +2250,7 @@ static void sec_ts_offload_set_running(struct sec_ts_data *ts, bool running)
 {
 	if (ts->offload.offload_running != running) {
 		ts->offload.offload_running = running;
-		if (running) {
+		if (running && ts->offload.config.filter_grip) {
 			pr_info("%s: disabling FW grip.\n", __func__);
 			sec_ts_enable_grip(ts, false);
 		} else {
@@ -2205,7 +2266,6 @@ static void sec_ts_offload_set_running(struct sec_ts_data *ts, bool running)
 static void sec_ts_read_event(struct sec_ts_data *ts)
 {
 	int ret;
-	u8 t_id;
 	u8 event_id;
 	u8 left_event_count;
 	u8 read_event_buff[MAX_EVENT_COUNT][SEC_TS_EVENT_BUFF_SIZE] = { { 0 } };
@@ -2247,7 +2307,7 @@ static void sec_ts_read_event(struct sec_ts_data *ts)
 		/* run lpm interrupt handler */
 	}
 
-	ret = t_id = event_id = curr_pos = remain_event_count = 0;
+	ret = event_id = curr_pos = remain_event_count = 0;
 	/* repeat READ_ONE_EVENT until buffer is empty(No event) */
 	ret = sec_ts_read(ts, SEC_TS_READ_ONE_EVENT,
 			  (u8 *)read_event_buff[0], SEC_TS_EVENT_BUFF_SIZE);
@@ -2303,8 +2363,6 @@ static void sec_ts_read_event(struct sec_ts_data *ts)
 	}
 
 	do {
-		s16 max_force_p = 0;
-
 		event_buff = read_event_buff[curr_pos];
 		event_id = event_buff[0] & 0x3;
 
@@ -2391,7 +2449,7 @@ static void sec_ts_read_event(struct sec_ts_data *ts)
 				switch (status_data_1) {
 				case 0x20:
 					/* watchdog reset !? */
-					sec_ts_unlocked_release_all_finger(ts);
+					sec_ts_locked_release_all_finger(ts);
 					ret = sec_ts_write(ts,
 						SEC_TS_CMD_SENSE_ON, NULL, 0);
 					if (ret < 0)
@@ -2405,14 +2463,14 @@ static void sec_ts_read_event(struct sec_ts_data *ts)
 					input_info(true, &ts->client->dev,
 						"%s: sw_reset done\n",
 						__func__);
-					sec_ts_unlocked_release_all_finger(ts);
+					sec_ts_locked_release_all_finger(ts);
 					complete_all(&ts->boot_completed);
 					break;
 				case 0x10:
 					input_info(true, &ts->client->dev,
 						"%s: hw_reset done\n",
 						__func__);
-					sec_ts_unlocked_release_all_finger(ts);
+					sec_ts_locked_release_all_finger(ts);
 					complete_all(&ts->boot_completed);
 					break;
 				default:
@@ -2428,7 +2486,7 @@ static void sec_ts_read_event(struct sec_ts_data *ts)
 				input_err(true, &ts->client->dev,
 					"%s: IC Event Queue is full\n",
 					__func__);
-				sec_ts_unlocked_release_all_finger(ts);
+				sec_ts_locked_release_all_finger(ts);
 			}
 
 			if ((p_event_status->stype ==
@@ -2457,21 +2515,27 @@ static void sec_ts_read_event(struct sec_ts_data *ts)
 				}
 
 #ifdef SEC_TS_SUPPORT_CUSTOMLIB
+			mutex_lock(&ts->eventlock);
 			sec_ts_handle_lib_status_event(ts, p_event_status);
+			mutex_unlock(&ts->eventlock);
 #endif
 			break;
 
 		case SEC_TS_COORDINATE_EVENT:
 			processed_pointer_event = true;
+			mutex_lock(&ts->eventlock);
 			sec_ts_handle_coord_event(ts,
 				(struct sec_ts_event_coordinate *)event_buff);
+			mutex_unlock(&ts->eventlock);
 			break;
 
 		case SEC_TS_GESTURE_EVENT:
 			p_gesture_status =
 				(struct sec_ts_gesture_status *)event_buff;
 #ifdef SEC_TS_SUPPORT_CUSTOMLIB
+			mutex_lock(&ts->eventlock);
 			sec_ts_handle_gesture_event(ts, p_gesture_status);
+			mutex_unlock(&ts->eventlock);
 #endif
 			break;
 
@@ -2483,44 +2547,6 @@ static void sec_ts_read_event(struct sec_ts_data *ts)
 				event_buff[3], event_buff[4], event_buff[5]);
 			break;
 		}
-
-		if (t_id < MAX_SUPPORT_TOUCH_COUNT + MAX_SUPPORT_HOVER_COUNT) {
-			if (ts->coord[t_id].action ==
-			    SEC_TS_COORDINATE_ACTION_PRESS) {
-				input_dbg(false, &ts->client->dev,
-					"%s[P] tID:%d x:%d y:%d z:%d major:%d minor:%d tc:%d type:%X\n",
-					ts->dex_name,
-					t_id, ts->coord[t_id].x,
-					ts->coord[t_id].y, ts->coord[t_id].z,
-					ts->coord[t_id].major,
-					ts->coord[t_id].minor,
-					ts->touch_count,
-					ts->coord[t_id].ttype);
-
-			} else if (ts->coord[t_id].action ==
-				   SEC_TS_COORDINATE_ACTION_RELEASE) {
-				input_dbg(false, &ts->client->dev,
-					"%s[R] tID:%d mc:%d tc:%d lx:%d ly:%d f:%d v:%02X%02X cal:%02X(%02X) id(%d,%d) p:%d P%02XT%04X\n",
-					ts->dex_name,
-					t_id, ts->coord[t_id].mcount,
-					ts->touch_count,
-					ts->coord[t_id].x, ts->coord[t_id].y,
-					max_force_p,
-					ts->plat_data->img_version_of_ic[2],
-					ts->plat_data->img_version_of_ic[3],
-					ts->cal_status, ts->nv, ts->tspid_val,
-					ts->tspicid_val,
-					ts->coord[t_id].palm_count,
-					ts->cal_count, ts->tune_fix_ver);
-
-				ts->coord[t_id].action =
-						SEC_TS_COORDINATE_ACTION_NONE;
-				ts->coord[t_id].mcount = 0;
-				ts->coord[t_id].palm_count = 0;
-				max_force_p = 0;
-			}
-		}
-
 		curr_pos++;
 		remain_event_count--;
 	} while (remain_event_count >= 0);
@@ -2528,8 +2554,9 @@ static void sec_ts_read_event(struct sec_ts_data *ts)
 #if IS_ENABLED(CONFIG_TOUCHSCREEN_OFFLOAD)
 	if (!ts->offload.offload_running) {
 #endif
-
+	mutex_lock(&ts->eventlock);
 	input_sync(ts->input_dev);
+	mutex_unlock(&ts->eventlock);
 
 #if IS_ENABLED(CONFIG_TOUCHSCREEN_OFFLOAD)
 	}
@@ -2638,11 +2665,7 @@ static irqreturn_t sec_ts_irq_thread(int irq, void *ptr)
 	pm_qos_update_request(&ts->pm_qos_req, 100);
 	pm_wakeup_event(&ts->client->dev, MSEC_PER_SEC);
 
-	mutex_lock(&ts->eventlock);
-
 	sec_ts_read_event(ts);
-
-	mutex_unlock(&ts->eventlock);
 
 #if IS_ENABLED(CONFIG_TOUCHSCREEN_HEATMAP)
 	/* Disable the firmware motion filter during single touch */
@@ -2664,16 +2687,26 @@ static void sec_ts_offload_report(void *handle,
 	bool touch_down = 0;
 	int i;
 
+	mutex_lock(&ts->eventlock);
+
 	input_set_timestamp(ts->input_dev, report->timestamp);
 
 	for (i = 0; i < MAX_COORDS; i++) {
-		if (report->coords[i].status == COORD_STATUS_FINGER) {
+		if (report->coords[i].status != COORD_STATUS_INACTIVE) {
+			int mt_tool = MT_TOOL_FINGER;
+
 			input_mt_slot(ts->input_dev, i);
 			touch_down = 1;
 			input_report_key(ts->input_dev, BTN_TOUCH,
 					 touch_down);
+
+			if (report->coords[i].status == COORD_STATUS_EDGE ||
+			    report->coords[i].status == COORD_STATUS_PALM ||
+			    report->coords[i].status == COORD_STATUS_CANCEL)
+				mt_tool = MT_TOOL_PALM;
+
 			input_mt_report_slot_state(ts->input_dev,
-						   MT_TOOL_FINGER, 1);
+						   mt_tool, 1);
 			input_report_abs(ts->input_dev, ABS_MT_POSITION_X,
 					 report->coords[i].x);
 			input_report_abs(ts->input_dev, ABS_MT_POSITION_Y,
@@ -2686,6 +2719,8 @@ static void sec_ts_offload_report(void *handle,
 				input_report_abs(ts->input_dev,
 					ABS_MT_PRESSURE,
 					report->coords[i].pressure);
+			input_report_abs(ts->input_dev, ABS_MT_ORIENTATION,
+					 report->coords[i].rotation);
 		} else {
 			input_mt_slot(ts->input_dev, i);
 			input_report_abs(ts->input_dev, ABS_MT_PRESSURE, 0);
@@ -2693,12 +2728,15 @@ static void sec_ts_offload_report(void *handle,
 						   MT_TOOL_FINGER, 0);
 			input_report_abs(ts->input_dev, ABS_MT_TRACKING_ID,
 					 -1);
+			input_report_abs(ts->input_dev, ABS_MT_ORIENTATION, 0);
 		}
 	}
 
 	input_report_key(ts->input_dev, BTN_TOUCH, touch_down);
 
 	input_sync(ts->input_dev);
+
+	mutex_unlock(&ts->eventlock);
 }
 #endif /* CONFIG_TOUCHSCREEN_OFFLOAD */
 
@@ -3014,7 +3052,7 @@ static int sec_ts_parse_dt(struct spi_device *client)
 			return -EINVAL;
 		}
 	} else {
-		input_err(true, dev,
+		input_dbg(true, dev,
 			  "%s: Failed to get tsp-icid gpio\n", __func__);
 	}
 
@@ -3043,8 +3081,9 @@ static int sec_ts_parse_dt(struct spi_device *client)
 	client->irq = gpio_to_irq(pdata->irq_gpio);
 
 	if (of_property_read_u32(np, "sec,irq_type", &pdata->irq_type)) {
-		input_err(true, dev,
-			  "%s: Failed to get irq_type property\n", __func__);
+		input_dbg(true, dev,
+			"%s: no irq_type property, set to default!\n",
+			__func__);
 		pdata->irq_type = IRQF_TRIGGER_LOW | IRQF_ONESHOT;
 	}
 
@@ -3090,7 +3129,7 @@ static int sec_ts_parse_dt(struct spi_device *client)
 		input_info(true, dev, "%s: TSP_ID : %d\n", __func__,
 			   gpio_get_value(pdata->tsp_id));
 	else
-		input_err(true, dev,
+		input_dbg(true, dev,
 			  "%s: Failed to get tsp-id gpio\n", __func__);
 
 	pdata->switch_gpio = of_get_named_gpio(np,
@@ -3156,11 +3195,11 @@ static int sec_ts_parse_dt(struct spi_device *client)
 
 	if (of_property_read_string_index(np, "sec,project_name", 0,
 					  &pdata->project_name))
-		input_err(true, &client->dev,
+		input_dbg(true, &client->dev,
 			"%s: skipped to get project_name property\n", __func__);
 	if (of_property_read_string_index(np, "sec,project_name",
 					  1, &pdata->model_name))
-		input_err(true, &client->dev,
+		input_dbg(true, &client->dev,
 			  "%s: skipped to get model_name property\n", __func__);
 
 #if defined(CONFIG_FB_MSM_MDSS_SAMSUNG)
@@ -3204,13 +3243,13 @@ static int sec_ts_parse_dt(struct spi_device *client)
 
 	if (of_property_read_string(np,
 		"sec,regulator_dvdd", &pdata->regulator_dvdd))
-		input_err(true, dev,
+		input_dbg(true, dev,
 			"%s: Failed to get regulator_dvdd name property\n",
 			__func__);
 
 	if (of_property_read_string(np,
 		"sec,regulator_avdd", &pdata->regulator_avdd))
-		input_err(true, dev,
+		input_dbg(true, dev,
 			"%s: Failed to get regulator_avdd name property\n",
 			__func__);
 
@@ -3240,14 +3279,14 @@ static int sec_ts_parse_dt(struct spi_device *client)
 	pdata->support_mt_pressure = true;
 
 #ifdef PAT_CONTROL
-	input_err(true, &client->dev,
+	input_info(true, &client->dev,
 		"%s: buffer limit: %d, lcd_id:%06X, bringup:%d, FW:%s(%d), id:%d,%d, pat_function:%d mis_cal:%d dex:%d, gesture:%d\n",
 		__func__, pdata->io_burstmax, lcdtype, pdata->bringup,
 		pdata->firmware_name, count, pdata->tsp_id, pdata->tsp_icid,
 		pdata->pat_function, pdata->mis_cal_check, pdata->support_dex,
 		pdata->support_sidegesture);
 #else
-	input_err(true, &client->dev,
+	input_info(true, &client->dev,
 		  "%s: buffer limit: %d, lcd_id:%06X, bringup:%d, FW:%s(%d), id:%d,%d, dex:%d, gesture:%d\n",
 		  __func__, pdata->io_burstmax, lcdtype, pdata->bringup,
 		  pdata->firmware_name, count, pdata->tsp_id, pdata->tsp_icid,
@@ -3457,6 +3496,11 @@ static void sec_ts_set_input_prop(struct sec_ts_data *ts,
 	if (ts->plat_data->support_mt_pressure)
 		input_set_abs_params(dev, ABS_MT_PRESSURE, 0,
 				     SEC_TS_PRESSURE_MAX, 0, 0);
+
+	/* Units are (-4096, 4096), representing the range between rotation
+	 * 90 degrees to left and 90 degrees to the right.
+	 */
+	input_set_abs_params(dev, ABS_MT_ORIENTATION, -4096, 4096, 0, 0);
 
 	if (propbit == INPUT_PROP_POINTER)
 		input_mt_init_slots(dev, MAX_SUPPORT_TOUCH_COUNT,
@@ -3899,8 +3943,10 @@ static int sec_ts_probe(struct spi_device *client)
 	}
 
 #if IS_ENABLED(CONFIG_TOUCHSCREEN_OFFLOAD)
-	ts->offload.caps.touch_offload_major_version = 1;
-	ts->offload.caps.touch_offload_minor_version = 0;
+	ts->offload.caps.touch_offload_major_version =
+			TOUCH_OFFLOAD_INTERFACE_MAJOR_VERSION;
+	ts->offload.caps.touch_offload_minor_version =
+			TOUCH_OFFLOAD_INTERFACE_MINOR_VERSION;
 	/* ID equivalent to the 4-byte, little-endian string: '00r3' */
 	ts->offload.caps.device_id =
 	    '3' << 24 | 'r' << 16 | '0' << 8 | '0' << 0;
@@ -3925,11 +3971,15 @@ static int sec_ts_probe(struct spi_device *client)
 	    TOUCH_DATA_TYPE_COORD | TOUCH_DATA_TYPE_STRENGTH;
 	ts->offload.caps.touch_scan_types =
 	    TOUCH_SCAN_TYPE_MUTUAL | TOUCH_SCAN_TYPE_SELF;
+	ts->offload.caps.context_channel_types =
+			CONTEXT_CHANNEL_TYPE_DRIVER_STATUS;
 
 	ts->offload.caps.continuous_reporting = true;
 	ts->offload.caps.noise_reporting = false;
 	ts->offload.caps.cancel_reporting = false;
+	ts->offload.caps.rotation_reporting = true;
 	ts->offload.caps.size_reporting = true;
+	ts->offload.caps.auto_reporting = false;
 	ts->offload.caps.filter_grip = true;
 	ts->offload.caps.filter_palm = true;
 	ts->offload.caps.num_sensitivity_settings = 1;
@@ -3986,7 +4036,7 @@ static int sec_ts_probe(struct spi_device *client)
 	if (ret < 0)
 		input_err(true, &ts->client->dev, "psy notifier register failed\n");
 
-	input_err(true, &ts->client->dev, "%s: done\n", __func__);
+	input_info(true, &ts->client->dev, "%s: done\n", __func__);
 	input_log_fix();
 
 	return 0;
@@ -4113,6 +4163,7 @@ void sec_ts_unlocked_release_all_finger(struct sec_ts_data *ts)
 		ts->offload.coords[i].major = 0;
 		ts->offload.coords[i].minor = 0;
 		ts->offload.coords[i].pressure = 0;
+		ts->offload.coords[i].rotation = 0;
 #endif
 		ts->coord[i].action = SEC_TS_COORDINATE_ACTION_RELEASE;
 		ts->coord[i].mcount = 0;
@@ -4145,86 +4196,13 @@ void sec_ts_unlocked_release_all_finger(struct sec_ts_data *ts)
 #endif
 	input_report_key(ts->input_dev, KEY_HOMEPAGE, 0);
 	input_sync(ts->input_dev);
-
 }
 
 void sec_ts_locked_release_all_finger(struct sec_ts_data *ts)
 {
-	int i;
-
 	mutex_lock(&ts->eventlock);
-
-	for (i = 0; i < MAX_SUPPORT_TOUCH_COUNT; i++) {
-		input_mt_slot(ts->input_dev, i);
-		if (ts->plat_data->support_mt_pressure)
-			input_report_abs(ts->input_dev, ABS_MT_PRESSURE, 0);
-		input_mt_report_slot_state(ts->input_dev, MT_TOOL_FINGER,
-					   false);
-
-		if ((ts->coord[i].action == SEC_TS_COORDINATE_ACTION_PRESS) ||
-			(ts->coord[i].action ==
-			 SEC_TS_COORDINATE_ACTION_MOVE)) {
-
-			input_info(true, &ts->client->dev,
-				"%s: [RA] tID:%d mc: %d tc:%d, v:%02X%02X, cal:%X(%X|%X), id(%d,%d), p:%d\n",
-				__func__, i, ts->coord[i].mcount,
-				ts->touch_count,
-				ts->plat_data->img_version_of_ic[2],
-				ts->plat_data->img_version_of_ic[3],
-				ts->cal_status, ts->nv, ts->cal_count,
-				ts->tspid_val, ts->tspicid_val,
-				ts->coord[i].palm_count);
-
-			do_gettimeofday(&ts->time_released[i]);
-
-			if (ts->time_longest <
-				(ts->time_released[i].tv_sec -
-				 ts->time_pressed[i].tv_sec))
-				ts->time_longest =
-					(ts->time_released[i].tv_sec -
-					 ts->time_pressed[i].tv_sec);
-		}
-
-#if IS_ENABLED(CONFIG_TOUCHSCREEN_OFFLOAD)
-		ts->offload.coords[i].status = COORD_STATUS_INACTIVE;
-		ts->offload.coords[i].major = 0;
-		ts->offload.coords[i].minor = 0;
-		ts->offload.coords[i].pressure = 0;
-#endif
-		ts->coord[i].action = SEC_TS_COORDINATE_ACTION_RELEASE;
-		ts->coord[i].mcount = 0;
-		ts->coord[i].palm_count = 0;
-
-	}
-
-	input_mt_slot(ts->input_dev, 0);
-
-	input_report_key(ts->input_dev, BTN_TOUCH, false);
-	input_report_key(ts->input_dev, BTN_TOOL_FINGER, false);
-#ifdef SW_GLOVE
-	input_report_switch(ts->input_dev, SW_GLOVE, false);
-#endif
-	ts->touchkey_glove_mode_status = false;
-	ts->touch_count = 0;
-	ts->check_multi = 0;
-	ts->tid_palm_state = 0;
-	ts->tid_grip_state = 0;
-	ts->tid_touch_state = 0;
-	ts->palms_leaved_once = false;
-	ts->grips_leaved_once = false;
-
-#ifdef KEY_SIDE_GESTURE
-	if (ts->plat_data->support_sidegesture) {
-		input_report_key(ts->input_dev, KEY_SIDE_GESTURE, 0);
-		input_report_key(ts->input_dev, KEY_SIDE_GESTURE_LEFT, 0);
-		input_report_key(ts->input_dev, KEY_SIDE_GESTURE_RIGHT, 0);
-	}
-#endif
-	input_report_key(ts->input_dev, KEY_HOMEPAGE, 0);
-	input_sync(ts->input_dev);
-
+	sec_ts_unlocked_release_all_finger(ts);
 	mutex_unlock(&ts->eventlock);
-
 }
 
 #ifdef USE_POWER_RESET_WORK
@@ -4698,7 +4676,7 @@ int sec_ts_start_device(struct sec_ts_data *ts)
 	mutex_lock(&ts->device_mutex);
 
 	if (ts->power_status == SEC_TS_STATE_POWER_ON) {
-		input_err(true, &ts->client->dev,
+		input_info(true, &ts->client->dev,
 			  "%s: already power on\n", __func__);
 		goto out;
 	}
@@ -5016,7 +4994,7 @@ static void sec_ts_resume_work(struct work_struct *work)
 		input_info(true, &ts->client->dev,
 			   "applying touch_offload settings.\n");
 
-		if (!ts->offload.config.filter_grip)
+		if (ts->offload.config.filter_grip)
 			sec_ts_enable_grip(ts, false);
 	}
 #endif
@@ -5329,7 +5307,6 @@ static int __init sec_ts_init(void)
 		return -ENODEV;
 	}
 #endif
-	pr_err("%s %s\n", SECLOG, __func__);
 
 #ifdef I2C_INTERFACE
 	return i2c_add_driver(&sec_ts_driver);

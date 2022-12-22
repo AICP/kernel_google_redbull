@@ -287,6 +287,7 @@
 #define TXID_TYPE_MASK			0xFF000000 /* bit[24-31] */
 #define TXID_TYPE_SHIFT			24
 #define TXID_DD_TYPE			0xE0
+#define TXID_DD_TYPE2			0xA0
 
 enum p9221_align_mfg_chk_state {
 	ALIGN_MFG_FAILED = -1,
@@ -324,6 +325,8 @@ struct p9221_charger_platform_data {
 	struct drm_panel		*panel;
 	u32				initial_panel_index;
 	u32				power_mitigate_threshold;
+	/* phone type for tx_id*/
+	u8				phone_type;
 };
 
 struct p9221_charger_data {
