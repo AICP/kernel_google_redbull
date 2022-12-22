@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-/* Copyright (c) 2016-2021, The Linux Foundation. All rights reserved. */
+/* Copyright (c) 2016-2020, The Linux Foundation. All rights reserved. */
 
 #ifndef _NET_CNSS2_H
 #define _NET_CNSS2_H
@@ -8,7 +8,6 @@
 
 #define CNSS_MAX_FILE_NAME		20
 #define CNSS_MAX_TIMESTAMP_LEN		32
-#define CNSS_MAX_DEV_MEM_NUM		4
 
 /*
  * Temporary change for compilation, will be removed
@@ -22,14 +21,12 @@ enum cnss_bus_width_type {
 	CNSS_BUS_WIDTH_LOW,
 	CNSS_BUS_WIDTH_MEDIUM,
 	CNSS_BUS_WIDTH_HIGH,
-	CNSS_BUS_WIDTH_VERY_HIGH,
-	CNSS_BUS_WIDTH_LOW_LATENCY
+	CNSS_BUS_WIDTH_VERY_HIGH
 };
 
 enum cnss_platform_cap_flag {
 	CNSS_HAS_EXTERNAL_SWREG = 0x01,
 	CNSS_HAS_UART_ACCESS = 0x02,
-	CNSS_HAS_DRV_SUPPORT = 0x04,
 };
 
 struct cnss_platform_cap {
@@ -53,11 +50,6 @@ struct cnss_device_version {
 	u32 minor_version;
 };
 
-struct cnss_dev_mem_info {
-	u64 start;
-	u64 size;
-};
-
 struct cnss_soc_info {
 	void __iomem *va;
 	phys_addr_t pa;
@@ -68,7 +60,6 @@ struct cnss_soc_info {
 	uint32_t fw_version;
 	char fw_build_timestamp[CNSS_MAX_TIMESTAMP_LEN + 1];
 	struct cnss_device_version device_version;
-	struct cnss_dev_mem_info dev_mem_info[CNSS_MAX_DEV_MEM_NUM];
 };
 
 struct cnss_wlan_runtime_ops {
@@ -83,23 +74,11 @@ enum cnss_driver_status {
 	CNSS_RECOVERY,
 	CNSS_FW_DOWN,
 	CNSS_HANG_EVENT,
-	CNSS_BUS_EVENT,
-};
-
-enum cnss_bus_event_type {
-	BUS_EVENT_PCI_LINK_DOWN = 0,
-
-	BUS_EVENT_INVALID = 0xFFFF,
 };
 
 struct cnss_hang_event {
 	void *hang_event_data;
 	u16 hang_event_data_len;
-};
-
-struct cnss_bus_event {
-	enum cnss_bus_event_type etype;
-	void *event_data;
 };
 
 struct cnss_uevent_data {
@@ -201,7 +180,6 @@ extern void cnss_schedule_recovery(struct device *dev,
 extern int cnss_self_recovery(struct device *dev,
 			      enum cnss_recovery_reason reason);
 extern int cnss_force_fw_assert(struct device *dev);
-extern int cnss_force_fw_assert_async(struct device *dev);
 extern int cnss_force_collect_rddm(struct device *dev);
 extern int cnss_qmi_send_get(struct device *dev);
 extern int cnss_qmi_send_put(struct device *dev);
@@ -217,7 +195,6 @@ extern int cnss_get_platform_cap(struct device *dev,
 extern struct iommu_domain *cnss_smmu_get_domain(struct device *dev);
 extern int cnss_smmu_map(struct device *dev,
 			 phys_addr_t paddr, uint32_t *iova_addr, size_t size);
-extern int cnss_smmu_unmap(struct device *dev, uint32_t iova_addr, size_t size);
 extern int cnss_get_soc_info(struct device *dev, struct cnss_soc_info *info);
 extern int cnss_request_bus_bandwidth(struct device *dev, int bandwidth);
 extern int cnss_power_up(struct device *dev);
@@ -235,7 +212,6 @@ extern int cnss_wlan_pm_control(struct device *dev, bool vote);
 extern int cnss_auto_suspend(struct device *dev);
 extern int cnss_auto_resume(struct device *dev);
 extern int cnss_pci_is_drv_connected(struct device *dev);
-extern int cnss_pci_force_wake_request_sync(struct device *dev, int timeout);
 extern int cnss_pci_force_wake_request(struct device *dev);
 extern int cnss_pci_is_device_awake(struct device *dev);
 extern int cnss_pci_force_wake_release(struct device *dev);
@@ -259,8 +235,5 @@ extern int cnss_athdiag_write(struct device *dev, uint32_t offset,
 			      uint32_t mem_type, uint32_t data_len,
 			      uint8_t *input);
 extern int cnss_set_fw_log_mode(struct device *dev, uint8_t fw_log_mode);
-extern int cnss_set_pcie_gen_speed(struct device *dev, u8 pcie_gen_speed);
-extern int cnss_pci_get_reg_dump(struct device *dev, uint8_t *buffer,
-				 uint32_t len);
 
 #endif /* _NET_CNSS2_H */

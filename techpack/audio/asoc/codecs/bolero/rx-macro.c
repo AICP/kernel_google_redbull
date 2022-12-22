@@ -77,11 +77,6 @@ static const struct snd_kcontrol_new name##_mux = \
 #define RX_MACRO_EC_MIX_TX1_MASK 0x0f
 #define RX_MACRO_EC_MIX_TX2_MASK 0x0f
 
-#define RX_MACRO_GAIN_MAX_VAL 0x28
-#define RX_MACRO_GAIN_VAL_UNITY 0x0
-/* Define macros to increase PA Gain by half */
-#define RX_MACRO_MOD_GAIN (RX_MACRO_GAIN_VAL_UNITY + 6)
-
 #define COMP_MAX_COEFF 25
 
 struct wcd_imped_val {
@@ -350,7 +345,6 @@ struct rx_macro_bcl_pmic_params {
 	u8 ppid;
 };
 
-static int rx_macro_core_vote(void *handle, bool enable);
 static int rx_macro_hw_params(struct snd_pcm_substream *substream,
 			       struct snd_pcm_hw_params *params,
 			       struct snd_soc_dai *dai);
@@ -384,6 +378,7 @@ struct rx_swr_ctrl_platform_data {
 							  void *data),
 			  void *swrm_handle,
 			  int action);
+	int (*pinctrl_setup)(void *handle, bool enable);
 };
 
 enum {
@@ -458,8 +453,6 @@ struct rx_macro_priv {
 	struct rx_macro_bcl_pmic_params bcl_pmic_params;
 	u16 clk_id;
 	u16 default_clk_id;
-	int8_t rx0_gain_val;
-	int8_t rx1_gain_val;
 };
 
 static struct snd_soc_dai_driver rx_macro_dai[];
@@ -1231,12 +1224,10 @@ static int rx_macro_mclk_enable(struct rx_macro_priv *rx_priv,
 		if (rx_priv->rx_mclk_users == 0) {
 			if (rx_priv->is_native_on)
 				rx_priv->clk_id = RX_CORE_CLK;
-			rx_macro_core_vote(rx_priv, true);
 			ret = bolero_clk_rsc_request_clock(rx_priv->dev,
 							   rx_priv->default_clk_id,
 							   rx_priv->clk_id,
 							   true);
-			rx_macro_core_vote(rx_priv, false);
 			if (ret < 0) {
 				dev_err(rx_priv->dev,
 					"%s: rx request clock enable failed\n",
@@ -1286,12 +1277,10 @@ static int rx_macro_mclk_enable(struct rx_macro_priv *rx_priv,
 				0x01, 0x00);
 			bolero_clk_rsc_fs_gen_request(rx_priv->dev,
 			   false);
-			rx_macro_core_vote(rx_priv, true);
 			bolero_clk_rsc_request_clock(rx_priv->dev,
 						 rx_priv->default_clk_id,
 						 rx_priv->clk_id,
 						 false);
-			rx_macro_core_vote(rx_priv, false);
 			rx_priv->clk_id = rx_priv->default_clk_id;
 		}
 	}
@@ -1401,21 +1390,18 @@ static int rx_macro_event_handler(struct snd_soc_component *component,
 		}
 		break;
 	case BOLERO_MACRO_EVT_PRE_SSR_UP:
-		rx_macro_core_vote(rx_priv, true);
 		/* enable&disable RX_CORE_CLK to reset GFMUX reg */
 		ret = bolero_clk_rsc_request_clock(rx_priv->dev,
 						rx_priv->default_clk_id,
 						RX_CORE_CLK, true);
-		if (ret < 0) {
+		if (ret < 0)
 			dev_err_ratelimited(rx_priv->dev,
 				"%s, failed to enable clk, ret:%d\n",
 				__func__, ret);
-		} else {
+		else
 			bolero_clk_rsc_request_clock(rx_priv->dev,
 						rx_priv->default_clk_id,
 						RX_CORE_CLK, false);
-		}
-		rx_macro_core_vote(rx_priv, false);
 		break;
 	case BOLERO_MACRO_EVT_SSR_UP:
 		trace_printk("%s, enter SSR up\n", __func__);
@@ -1430,56 +1416,6 @@ static int rx_macro_event_handler(struct snd_soc_component *component,
 		break;
 	case BOLERO_MACRO_EVT_CLK_RESET:
 		bolero_rsc_clk_reset(rx_dev, RX_CORE_CLK);
-		break;
-	case BOLERO_MACRO_EVT_RX_PA_GAIN_UPDATE:
-		rx_priv->rx0_gain_val = snd_soc_component_read32(component,
-					BOLERO_CDC_RX_RX0_RX_VOL_CTL);
-		rx_priv->rx1_gain_val = snd_soc_component_read32(component,
-					BOLERO_CDC_RX_RX1_RX_VOL_CTL);
-		if (data) {
-			/* Reduce gain by half only if its greater than -6DB */
-			if ((rx_priv->rx0_gain_val >= RX_MACRO_GAIN_VAL_UNITY)
-			&& (rx_priv->rx0_gain_val <= RX_MACRO_GAIN_MAX_VAL))
-				snd_soc_component_update_bits(component,
-					BOLERO_CDC_RX_RX0_RX_VOL_CTL, 0xFF,
-					(rx_priv->rx0_gain_val -
-					 RX_MACRO_MOD_GAIN));
-			if ((rx_priv->rx1_gain_val >= RX_MACRO_GAIN_VAL_UNITY)
-			&& (rx_priv->rx1_gain_val <= RX_MACRO_GAIN_MAX_VAL))
-				snd_soc_component_update_bits(component,
-					BOLERO_CDC_RX_RX1_RX_VOL_CTL, 0xFF,
-					(rx_priv->rx1_gain_val -
-					 RX_MACRO_MOD_GAIN));
-		}
-		else {
-			/* Reset gain value to default */
-			if ((rx_priv->rx0_gain_val >=
-			    (RX_MACRO_GAIN_VAL_UNITY - RX_MACRO_MOD_GAIN)) &&
-			    (rx_priv->rx0_gain_val <= (RX_MACRO_GAIN_MAX_VAL -
-			    RX_MACRO_MOD_GAIN)))
-				snd_soc_component_update_bits(component,
-					BOLERO_CDC_RX_RX0_RX_VOL_CTL, 0xFF,
-					(rx_priv->rx0_gain_val +
-					 RX_MACRO_MOD_GAIN));
-			if ((rx_priv->rx1_gain_val >=
-			    (RX_MACRO_GAIN_VAL_UNITY - RX_MACRO_MOD_GAIN)) &&
-			    (rx_priv->rx1_gain_val <= (RX_MACRO_GAIN_MAX_VAL -
-			    RX_MACRO_MOD_GAIN)))
-				snd_soc_component_update_bits(component,
-					BOLERO_CDC_RX_RX1_RX_VOL_CTL, 0xFF,
-					(rx_priv->rx1_gain_val +
-					 RX_MACRO_MOD_GAIN));
-		}
-		break;
-	case BOLERO_MACRO_EVT_HPHL_HD2_ENABLE:
-		/* Enable hd2 config for hphl*/
-		snd_soc_component_update_bits(component,
-				BOLERO_CDC_RX_RX0_RX_PATH_CFG0, 0x04, data);
-		break;
-	case BOLERO_MACRO_EVT_HPHR_HD2_ENABLE:
-		/* Enable hd2 config for hphr*/
-		snd_soc_component_update_bits(component,
-				BOLERO_CDC_RX_RX1_RX_PATH_CFG0, 0x04, data);
 		break;
 	}
 done:
@@ -3680,25 +3616,22 @@ static const struct snd_soc_dapm_route rx_audio_map[] = {
 
 static int rx_macro_core_vote(void *handle, bool enable)
 {
-	int rc = 0;
 	struct rx_macro_priv *rx_priv = (struct rx_macro_priv *) handle;
 
 	if (rx_priv == NULL) {
 		pr_err("%s: rx priv data is NULL\n", __func__);
 		return -EINVAL;
 	}
-
 	if (enable) {
 		pm_runtime_get_sync(rx_priv->dev);
-		if (bolero_check_core_votes(rx_priv->dev))
-			rc = 0;
-		else
-			rc = -ENOTSYNC;
-	} else {
 		pm_runtime_put_autosuspend(rx_priv->dev);
 		pm_runtime_mark_last_busy(rx_priv->dev);
 	}
-	return rc;
+
+	if (bolero_check_core_votes(rx_priv->dev))
+		return 0;
+	else
+		return -EINVAL;
 }
 
 static int rx_swrm_clock(void *handle, bool enable)
@@ -3893,8 +3826,6 @@ static int rx_macro_init(struct snd_soc_component *component)
 		return ret;
 	}
 	rx_priv->dev_up = true;
-	rx_priv->rx0_gain_val = 0;
-	rx_priv->rx1_gain_val = 0;
 	snd_soc_dapm_ignore_suspend(dapm, "RX_MACRO_AIF1 Playback");
 	snd_soc_dapm_ignore_suspend(dapm, "RX_MACRO_AIF2 Playback");
 	snd_soc_dapm_ignore_suspend(dapm, "RX_MACRO_AIF3 Playback");
@@ -4064,12 +3995,6 @@ static int rx_macro_probe(struct platform_device *pdev)
 	u32 is_used_rx_swr_gpio = 1;
 	const char *is_used_rx_swr_gpio_dt = "qcom,is-used-swr-gpio";
 
-	if (!bolero_is_va_macro_registered(&pdev->dev)) {
-		dev_err(&pdev->dev,
-			"%s: va-macro not registered yet, defer\n", __func__);
-		return -EPROBE_DEFER;
-	}
-
 	rx_priv = devm_kzalloc(&pdev->dev, sizeof(struct rx_macro_priv),
 			    GFP_KERNEL);
 	if (!rx_priv)
@@ -4146,6 +4071,7 @@ static int rx_macro_probe(struct platform_device *pdev)
 	rx_priv->swr_plat_data.clk = rx_swrm_clock;
 	rx_priv->swr_plat_data.core_vote = rx_macro_core_vote;
 	rx_priv->swr_plat_data.handle_irq = NULL;
+	rx_priv->swr_plat_data.pinctrl_setup = NULL;
 
 	ret = of_property_read_u8_array(pdev->dev.of_node,
 				"qcom,rx-bcl-pmic-params", bcl_pmic_params,
@@ -4176,12 +4102,12 @@ static int rx_macro_probe(struct platform_device *pdev)
 			"%s: register macro failed\n", __func__);
 		goto err_reg_macro;
 	}
+	schedule_work(&rx_priv->rx_macro_add_child_devices_work);
 	pm_runtime_set_autosuspend_delay(&pdev->dev, AUTO_SUSPEND_DELAY);
 	pm_runtime_use_autosuspend(&pdev->dev);
 	pm_runtime_set_suspended(&pdev->dev);
 	pm_suspend_ignore_children(&pdev->dev, true);
 	pm_runtime_enable(&pdev->dev);
-	schedule_work(&rx_priv->rx_macro_add_child_devices_work);
 
 	return 0;
 

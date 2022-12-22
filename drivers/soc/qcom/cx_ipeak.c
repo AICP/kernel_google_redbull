@@ -7,6 +7,7 @@
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/printk.h>
+#include <linux/spinlock.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
 #include <linux/slab.h>
@@ -43,34 +44,30 @@ struct cx_ipeak_core_ops {
 	struct cx_ipeak_client* (*register_client)(int client_id);
 };
 
-static struct cx_ipeak_victims {
-	u32 client_id;
-	u32 victim_id;
-	u32 freq_limit;
-	void *data;
-	cx_ipeak_victim_fn victim_cb;
-	struct cx_ipeak_client *client;
-} victim_list[CXIP_VICTIMS];
-
 static struct cx_ipeak_device {
-	struct platform_device *pdev;
-	struct mutex vote_lock;
-	struct mutex throttle_lock;
+	spinlock_t vote_lock;
 	void __iomem *tcsr_vptr;
 	struct cx_ipeak_core_ops *core_ops;
 	u32 victims_count;
-	int danger_intr_num;
-	int safe_intr_num;
+	u32 victims_reg_count;
+	u32 danger_intr_num;
+	u32 safe_intr_num;
 } device_ipeak;
 
 struct cx_ipeak_client {
-	u32 vote_count;
+	int vote_count;
 	unsigned int offset;
-	u32 client_id;
-	bool danger_assert;
+	int client_id;
 	struct cx_ipeak_device *dev;
 };
 
+static struct cx_ipeak_victims {
+	int client_id;
+	int victim_id;
+	u32 freq_limit;
+	void *data;
+	cx_ipeak_victim_fn victim_cb;
+} victims_ipeak[CXIP_VICTIMS];
 
 /**
  * cx_ipeak_register() - allocate client structure and fill device private and
@@ -184,15 +181,16 @@ int cx_ipeak_victim_register(struct cx_ipeak_client *client,
 	if (!victim_cb)
 		return -EINVAL;
 
-	for (i = 0; i < device_ipeak.victims_count; i++)
-		if (client->client_id == victim_list[i].client_id) {
-			victim_list[i].victim_cb = victim_cb;
-			victim_list[i].data = data;
-			victim_list[i].client = client;
-			return 0;
+	while (i < device_ipeak.victims_count) {
+		if (client->client_id == victims_ipeak[i].client_id) {
+			victims_ipeak[i].victim_cb = victim_cb;
+			victims_ipeak[i].data = data;
+			device_ipeak.victims_reg_count++;
+			break;
 		}
-
-	return -ENOENT;
+		i++;
+	}
+	return 0;
 }
 EXPORT_SYMBOL(cx_ipeak_victim_register);
 
@@ -206,12 +204,15 @@ void cx_ipeak_victim_unregister(struct cx_ipeak_client *client)
 {
 	int i = 0;
 
-	for (i = 0; i < device_ipeak.victims_count; i++)
-		if (client->client_id == victim_list[i].client_id) {
-			victim_list[i].victim_cb = NULL;
-			victim_list[i].data = NULL;
-			victim_list[i].client = NULL;
+	while (i < device_ipeak.victims_count) {
+		if (client->client_id == victims_ipeak[i].client_id) {
+			victims_ipeak[i].victim_cb = NULL;
+			victims_ipeak[i].data = NULL;
+			device_ipeak.victims_reg_count--;
+			break;
 		}
+		i++;
+	}
 }
 EXPORT_SYMBOL(cx_ipeak_victim_unregister);
 
@@ -242,7 +243,7 @@ static int cx_ipeak_update_v1(struct cx_ipeak_client *client, bool vote)
 	unsigned int reg_val;
 	int ret = 0;
 
-	mutex_lock(&client->dev->vote_lock);
+	spin_lock(&client->dev->vote_lock);
 
 	if (vote) {
 		if (client->vote_count == 0) {
@@ -281,36 +282,27 @@ static int cx_ipeak_update_v1(struct cx_ipeak_client *client, bool vote)
 	}
 
 done:
-	mutex_unlock(&client->dev->vote_lock);
+	spin_unlock(&client->dev->vote_lock);
 	return ret;
 }
 
 static int cx_ipeak_update_v2(struct cx_ipeak_client *client, bool vote)
 {
-	u32 reg_val;
+	unsigned int reg_val;
 	int ret = 0;
 
-	mutex_lock(&client->dev->vote_lock);
+	spin_lock(&client->dev->vote_lock);
 
 	if (vote) {
 		if (client->vote_count == 0) {
 			writel_relaxed(BIT(0),
-					client->dev->tcsr_vptr +
-					client->offset);
+				       client->dev->tcsr_vptr +
+				       client->offset);
 
-			ret = readl_poll_timeout(
-					client->dev->tcsr_vptr +
-					TCSR_CXIP_LM_DANGER_OFFSET,
-					reg_val, !reg_val ||
-					client->danger_assert,
-					0, CXIP_POLL_TIMEOUT_US);
-			/*
-			 * If poll exits due to danger assert condition return
-			 * error to client to avoid voting.
-			 */
-			if (client->danger_assert)
-				ret = -ETIMEDOUT;
-
+			ret = readl_poll_timeout(client->dev->tcsr_vptr +
+						 TCSR_CXIP_LM_DANGER_OFFSET,
+						 reg_val, !reg_val, 0,
+						 CXIP_POLL_TIMEOUT_US);
 			if (ret) {
 				writel_relaxed(0,
 					       client->dev->tcsr_vptr +
@@ -333,86 +325,57 @@ static int cx_ipeak_update_v2(struct cx_ipeak_client *client, bool vote)
 	}
 
 done:
-	mutex_unlock(&client->dev->vote_lock);
+	spin_unlock(&client->dev->vote_lock);
 	return ret;
 }
 
-static irqreturn_t cx_ipeak_irq_soft_handler(int irq, void *data)
+static irqreturn_t cx_ipeak_irq_handler(int irq, void *data)
 {
 	int i;
 	irqreturn_t ret = IRQ_NONE;
 
-	mutex_lock(&device_ipeak.throttle_lock);
-
-	for (i = 0; i < device_ipeak.victims_count; i++) {
-		cx_ipeak_victim_fn victim_cb = victim_list[i].victim_cb;
-		struct cx_ipeak_client *victim_client = victim_list[i].client;
-
-		if (!victim_cb || !victim_client)
-			continue;
+	for (i = 0; i < device_ipeak.victims_reg_count; i++) {
+		cx_ipeak_victim_fn victim_cb = victims_ipeak[i].victim_cb;
 
 		if (irq == device_ipeak.danger_intr_num) {
-
-			victim_client->danger_assert = true;
-
-			/*
-			 * To set frequency limit at victim client
-			 * side in danger interrupt case
-			 */
-
-			ret = victim_cb(victim_list[i].data,
-					victim_list[i].freq_limit);
-
-			if (ret) {
-				dev_err(&device_ipeak.pdev->dev,
-					"Unable to throttle client:%d freq:%d\n",
-					victim_list[i].client_id,
-					victim_list[i].freq_limit);
-				victim_client->danger_assert = false;
-				ret = IRQ_HANDLED;
-				goto done;
-			}
-
+		/*
+		 * To set frequency limit at victim client
+		 * side in danger interrupt case
+		 */
+			victim_cb(victims_ipeak[i].data,
+				victims_ipeak[i].freq_limit);
 			writel_relaxed(1, (device_ipeak.tcsr_vptr +
 						CXIP_VICTIM_OFFSET +
-						((victim_list[i].victim_id)*
-						 CXIP_CLIENT_OFFSET)));
-
+						((victims_ipeak[i].victim_id)*
+							 CXIP_CLIENT_OFFSET)));
 			ret = IRQ_HANDLED;
 		} else if (irq == device_ipeak.safe_intr_num) {
-			victim_client->danger_assert = false;
-			/*
-			 * To remove frequency limit at victim client
-			 * side in safe interrupt case
-			 */
-			ret = victim_cb(victim_list[i].data, 0);
-
-			if (ret)
-				dev_err(&device_ipeak.pdev->dev, "Unable to remove freq limit client:%d\n",
-						victim_list[i].client_id);
-
+		/*
+		 * To remove frequency limit at victim client
+		 * side in safe interrupt case
+		 */
+			victim_cb(victims_ipeak[i].data, 0);
 			writel_relaxed(0, (device_ipeak.tcsr_vptr +
 						CXIP_VICTIM_OFFSET +
-						((victim_list[i].victim_id)*
+						((victims_ipeak[i].victim_id)*
 						 CXIP_CLIENT_OFFSET)));
 			ret = IRQ_HANDLED;
 		}
 	}
-done:
-	mutex_unlock(&device_ipeak.throttle_lock);
+
 	return ret;
 }
 
 int cx_ipeak_request_irq(struct platform_device *pdev, const  char *name,
-		irq_handler_t handler, irq_handler_t thread_fn, void *data)
+		irq_handler_t handler, void *data)
 {
 	int ret, num = platform_get_irq_byname(pdev, name);
 
 	if (num < 0)
 		return num;
 
-	ret = devm_request_threaded_irq(&pdev->dev, num, handler, thread_fn,
-			IRQF_ONESHOT | IRQF_TRIGGER_RISING, name, data);
+	ret = devm_request_irq(&pdev->dev, num, handler, IRQF_TRIGGER_RISING,
+				name, data);
 
 	if (ret)
 		dev_err(&pdev->dev, "Unable to get interrupt %s: %d\n",
@@ -446,6 +409,7 @@ struct cx_ipeak_core_ops core_ops_v2 = {
 static int cx_ipeak_probe(struct platform_device *pdev)
 {
 	struct resource *res;
+	int status = -EINVAL;
 	int i, ret, count;
 	u32 victim_en;
 
@@ -476,21 +440,21 @@ static int cx_ipeak_probe(struct platform_device *pdev)
 		for (i = 0; i < (count/VICTIM_ENTRIES); i++) {
 			ret = of_property_read_u32_index(pdev->dev.of_node,
 					"victims_table", i*VICTIM_ENTRIES,
-					&victim_list[i].client_id);
+					&victims_ipeak[i].client_id);
 
 			if (ret)
 				return ret;
 
 			ret = of_property_read_u32_index(pdev->dev.of_node,
 					"victims_table", (i*VICTIM_ENTRIES) + 1,
-					&victim_list[i].victim_id);
+					&victims_ipeak[i].victim_id);
 
 			if (ret)
 				return ret;
 
 			ret = of_property_read_u32_index(pdev->dev.of_node,
 					"victims_table", (i*VICTIM_ENTRIES) + 2,
-					&victim_list[i].freq_limit);
+					&victims_ipeak[i].freq_limit);
 
 			if (ret)
 				return ret;
@@ -498,25 +462,24 @@ static int cx_ipeak_probe(struct platform_device *pdev)
 			device_ipeak.victims_count++;
 		}
 
-		device_ipeak.danger_intr_num = cx_ipeak_request_irq(pdev,
-				"cx_ipeak_danger", NULL,
-				cx_ipeak_irq_soft_handler, NULL);
+		status = cx_ipeak_request_irq(pdev, "cx_ipeak_danger",
+				cx_ipeak_irq_handler, NULL);
 
-		if (device_ipeak.danger_intr_num < 0)
-			return device_ipeak.danger_intr_num;
+		if (status < 0)
+			return status;
 
-		device_ipeak.safe_intr_num = cx_ipeak_request_irq(pdev,
-				"cx_ipeak_safe", NULL,
-				cx_ipeak_irq_soft_handler, NULL);
+		device_ipeak.danger_intr_num = status;
 
-		if (device_ipeak.safe_intr_num < 0)
-			return device_ipeak.safe_intr_num;
+		status = cx_ipeak_request_irq(pdev, "cx_ipeak_safe",
+				cx_ipeak_irq_handler, NULL);
 
+		if (status < 0)
+			return status;
+
+		device_ipeak.safe_intr_num = status;
 	}
 
-	device_ipeak.pdev = pdev;
-	mutex_init(&device_ipeak.vote_lock);
-	mutex_init(&device_ipeak.throttle_lock);
+	spin_lock_init(&device_ipeak.vote_lock);
 	return 0;
 }
 

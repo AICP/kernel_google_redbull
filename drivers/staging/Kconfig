@@ -114,6 +114,8 @@ source "drivers/staging/mt7621-spi/Kconfig"
 
 source "drivers/staging/mt7621-dma/Kconfig"
 
+source "drivers/staging/mt7621-mmc/Kconfig"
+
 source "drivers/staging/mt7621-eth/Kconfig"
 
 source "drivers/staging/mt7621-dts/Kconfig"
@@ -126,10 +128,6 @@ source "drivers/staging/erofs/Kconfig"
 
 source "drivers/staging/wlan_mac/Kconfig"
 
-config QCA_CLD_WLAN
-	tristate "Qualcomm Atheros CLD WLAN module"
-	default n
-	help
-	  Add support for the Qualcomm Atheros CLD WLAN module.
+source "drivers/staging/qcacld-3.0/Kconfig"
 
 endif # STAGING

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2012, 2017-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012, 2017-2020, The Linux Foundation. All rights reserved.
  */
 
 #include <linux/kernel.h>
@@ -1017,7 +1017,6 @@ static void coresight_enable_source_link(struct list_head *path)
 
 	return;
 err:
-	coresight_disable_path_from(path, nd);
 	coresight_release_path(csdev, path);
 }
 
@@ -1203,6 +1202,7 @@ static ssize_t enable_sink_store(struct device *dev,
 	int ret;
 	unsigned long val;
 	struct coresight_device *csdev = to_coresight_device(dev);
+	struct coresight_device *sink = NULL;
 
 	ret = kstrtoul(buf, 10, &val);
 	if (ret)
@@ -1210,7 +1210,10 @@ static ssize_t enable_sink_store(struct device *dev,
 	mutex_lock(&coresight_mutex);
 
 	if (val) {
-		if (activated_sink)
+		sink = activated_sink ? activated_sink :
+			coresight_get_enabled_sink(false);
+		if (sink && strcmp(dev_name(&sink->dev),
+				dev_name(&csdev->dev)))
 			goto err;
 		csdev->activated = true;
 	} else {

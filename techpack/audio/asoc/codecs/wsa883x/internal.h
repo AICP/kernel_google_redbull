@@ -66,7 +66,6 @@ enum {
 	BOLERO_WSA_EVT_SSR_DOWN,
 	BOLERO_WSA_EVT_SSR_UP,
 	BOLERO_WSA_EVT_PA_ON_POST_FSCLK,
-	BOLERO_WSA_EVT_PA_ON_POST_FSCLK_ADIE_LB,
 };
 
 struct wsa_ctrl_platform_data {
@@ -98,7 +97,6 @@ struct wsa883x_priv {
 	bool comp_enable;
 	bool visense_enable;
 	bool ext_vdd_spk;
-	bool dapm_bias_off;
 	struct swr_port port[WSA883X_MAX_SWR_PORTS];
 	int global_pa_cnt;
 	int dev_mode;

@@ -1213,10 +1213,6 @@ int usb_add_gadget_udc_release(struct device *parent, struct usb_gadget *gadget,
 	INIT_WORK(&gadget->work, usb_gadget_state_work);
 	gadget->dev.parent = parent;
 
-	dma_set_coherent_mask(&gadget->dev, parent->coherent_dma_mask);
-	gadget->dev.dma_parms = parent->dma_parms;
-	gadget->dev.dma_mask = parent->dma_mask;
-
 	if (release)
 		gadget->dev.release = release;
 	else
@@ -1512,13 +1508,10 @@ static ssize_t soft_connect_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t n)
 {
 	struct usb_udc		*udc = container_of(dev, struct usb_udc, dev);
-	ssize_t			ret;
 
-	mutex_lock(&udc_lock);
 	if (!udc->driver) {
 		dev_err(dev, "soft-connect without a gadget driver\n");
-		ret = -EOPNOTSUPP;
-		goto out;
+		return -EOPNOTSUPP;
 	}
 
 	if (sysfs_streq(buf, "connect")) {
@@ -1530,14 +1523,10 @@ static ssize_t soft_connect_store(struct device *dev,
 		usb_gadget_udc_stop(udc);
 	} else {
 		dev_err(dev, "unsupported command '%s'\n", buf);
-		ret = -EINVAL;
-		goto out;
+		return -EINVAL;
 	}
 
-	ret = n;
-out:
-	mutex_unlock(&udc_lock);
-	return ret;
+	return n;
 }
 static DEVICE_ATTR_WO(soft_connect);
 

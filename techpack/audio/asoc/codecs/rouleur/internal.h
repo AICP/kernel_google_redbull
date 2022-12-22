@@ -50,7 +50,6 @@ struct rouleur_priv {
 
 	bool comp1_enable;
 	bool comp2_enable;
-	bool dapm_bias_off;
 
 	struct irq_domain *virq;
 	struct wcd_irq_info irq_info;
@@ -84,12 +83,6 @@ struct rouleur_priv {
 	struct mutex rx_clk_lock;
 	struct mutex main_bias_lock;
 	bool dev_up;
-	bool usbc_hs_status;
-	struct notifier_block psy_nb;
-	struct work_struct soc_eval_work;
-	bool low_soc;
-	int foundry_id_reg;
-	int foundry_id;
 };
 
 struct rouleur_micbias_setting {
@@ -107,7 +100,6 @@ struct rouleur_pdata {
 	struct cdc_regulator *regulator;
 	int num_supplies;
 	int reset_reg;
-	int foundry_id_reg;
 };
 
 struct wcd_ctrl_platform_data {
@@ -137,9 +129,6 @@ enum {
 	WCD_BOLERO_EVT_IMPED_FALSE,	/* for imped false */
 	WCD_BOLERO_EVT_RX_COMPANDER_SOFT_RST,
 	WCD_BOLERO_EVT_BCS_CLK_OFF,
-	WCD_BOLERO_EVT_RX_PA_GAIN_UPDATE, /* To reduce PA gain for low SoC */
-	WCD_BOLERO_EVT_HPHL_HD2_ENABLE, /* to enable hd2 config for hphl */
-	WCD_BOLERO_EVT_HPHR_HD2_ENABLE, /* to enable hd2 config for hphr */
 };
 
 enum {

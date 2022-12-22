@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Copyright (c) 2016-2021, The Linux Foundation. All rights reserved. */
+/* Copyright (c) 2016-2020, The Linux Foundation. All rights reserved. */
 
 #include <linux/delay.h>
 #include <linux/jiffies.h>
@@ -12,6 +12,8 @@
 #include <linux/suspend.h>
 #include <linux/timer.h>
 #include <soc/qcom/minidump.h>
+#include <soc/qcom/ramdump.h>
+#include <soc/qcom/subsystem_notif.h>
 
 #include "main.h"
 #include "bus.h"
@@ -24,7 +26,7 @@
 #define CNSS_DUMP_NAME			"CNSS_WLAN"
 #define CNSS_DUMP_DESC_SIZE		0x1000
 #define CNSS_DUMP_SEG_VER		0x1
-#define RECOVERY_DELAY_MS		100
+#define WLAN_RECOVERY_DELAY		1000
 #define FILE_SYSTEM_READY		1
 #define FW_READY_TIMEOUT		20000
 #define FW_ASSERT_TIMEOUT		5000
@@ -41,7 +43,6 @@
 #define CNSS_QMI_TIMEOUT_DEFAULT	10000
 #define CNSS_BDF_TYPE_DEFAULT		CNSS_BDF_ELF
 #define CNSS_TIME_SYNC_PERIOD_DEFAULT	900000
-#define CNSS_MIN_TIME_SYNC_PERIOD	2000
 
 static struct cnss_plat_data *plat_env;
 
@@ -177,7 +178,6 @@ int cnss_request_bus_bandwidth(struct device *dev, int bandwidth)
 	case CNSS_BUS_WIDTH_MEDIUM:
 	case CNSS_BUS_WIDTH_HIGH:
 	case CNSS_BUS_WIDTH_VERY_HIGH:
-	case CNSS_BUS_WIDTH_LOW_LATENCY:
 		ret = msm_bus_scale_client_update_request
 			(bus_bw_info->bus_client, bandwidth);
 		if (!ret)
@@ -202,11 +202,8 @@ int cnss_get_platform_cap(struct device *dev, struct cnss_platform_cap *cap)
 	if (!plat_priv)
 		return -ENODEV;
 
-	if (!cap)
-		return -EINVAL;
-
-	*cap = plat_priv->cap;
-	cnss_pr_dbg("Platform cap_flag is 0x%x\n", cap->cap_flag);
+	if (cap)
+		*cap = plat_priv->cap;
 
 	return 0;
 }
@@ -358,24 +355,6 @@ int cnss_set_fw_log_mode(struct device *dev, u8 fw_log_mode)
 }
 EXPORT_SYMBOL(cnss_set_fw_log_mode);
 
-int cnss_set_pcie_gen_speed(struct device *dev, u8 pcie_gen_speed)
-{
-	struct cnss_plat_data *plat_priv = cnss_bus_dev_to_plat_priv(dev);
-
-	if (plat_priv->device_id != QCA6490_DEVICE_ID ||
-	    !plat_priv->fw_pcie_gen_switch)
-		return -ENOTSUPP;
-
-	if (pcie_gen_speed < QMI_PCIE_GEN_SPEED_1_V01 ||
-	    pcie_gen_speed > QMI_PCIE_GEN_SPEED_3_V01)
-		return -EINVAL;
-
-	cnss_pr_dbg("WLAN provided PCIE gen speed: %d\n", pcie_gen_speed);
-	plat_priv->pcie_gen_speed = pcie_gen_speed;
-	return 0;
-}
-EXPORT_SYMBOL(cnss_set_pcie_gen_speed);
-
 static int cnss_fw_mem_ready_hdlr(struct cnss_plat_data *plat_priv)
 {
 	int ret = 0;
@@ -451,8 +430,6 @@ static int cnss_fw_ready_hdlr(struct cnss_plat_data *plat_priv)
 	del_timer(&plat_priv->fw_boot_timer);
 	set_bit(CNSS_FW_READY, &plat_priv->driver_state);
 	clear_bit(CNSS_DEV_ERR_NOTIFY, &plat_priv->driver_state);
-
-	cnss_wlfw_send_pcie_gen_speed_sync(plat_priv);
 
 	if (test_bit(CNSS_FW_BOOT_RECOVERY, &plat_priv->driver_state)) {
 		clear_bit(CNSS_FW_BOOT_RECOVERY, &plat_priv->driver_state);
@@ -607,38 +584,6 @@ out:
 	return ret;
 }
 
-/**
- * cnss_get_timeout - Get timeout for corresponding type.
- * @plat_priv: Pointer to platform driver context.
- * @cnss_timeout_type: Timeout type.
- *
- * Return: Timeout in milliseconds.
- */
-unsigned int cnss_get_timeout(struct cnss_plat_data *plat_priv,
-			      enum cnss_timeout_type timeout_type)
-{
-	unsigned int qmi_timeout = cnss_get_qmi_timeout(plat_priv);
-
-	switch (timeout_type) {
-	case CNSS_TIMEOUT_QMI:
-		return qmi_timeout;
-	case CNSS_TIMEOUT_POWER_UP:
-		return (qmi_timeout << 2);
-	case CNSS_TIMEOUT_IDLE_RESTART:
-		return ((qmi_timeout << 1) + WLAN_WD_TIMEOUT_MS);
-	case CNSS_TIMEOUT_CALIBRATION:
-		return (qmi_timeout << 2);
-	case CNSS_TIMEOUT_WLAN_WATCHDOG:
-		return ((qmi_timeout << 1) + WLAN_WD_TIMEOUT_MS);
-	case CNSS_TIMEOUT_RDDM:
-		return CNSS_RDDM_TIMEOUT_MS;
-	case CNSS_TIMEOUT_RECOVERY:
-		return RECOVERY_TIMEOUT;
-	default:
-		return qmi_timeout;
-	}
-}
-
 unsigned int cnss_get_boot_timeout(struct device *dev)
 {
 	struct cnss_plat_data *plat_priv = cnss_bus_dev_to_plat_priv(dev);
@@ -648,7 +593,7 @@ unsigned int cnss_get_boot_timeout(struct device *dev)
 		return 0;
 	}
 
-	return cnss_get_timeout(plat_priv, CNSS_TIMEOUT_QMI);
+	return cnss_get_qmi_timeout(plat_priv);
 }
 EXPORT_SYMBOL(cnss_get_boot_timeout);
 
@@ -674,14 +619,13 @@ int cnss_power_up(struct device *dev)
 	if (plat_priv->device_id == QCA6174_DEVICE_ID)
 		goto out;
 
-	timeout = cnss_get_timeout(plat_priv, CNSS_TIMEOUT_POWER_UP);
+	timeout = cnss_get_boot_timeout(dev);
 
 	reinit_completion(&plat_priv->power_up_complete);
 	ret = wait_for_completion_timeout(&plat_priv->power_up_complete,
-					  msecs_to_jiffies(timeout));
+					  msecs_to_jiffies(timeout) << 2);
 	if (!ret) {
-		cnss_pr_err("Timeout (%ums) waiting for power up to complete\n",
-			    timeout);
+		cnss_pr_err("Timeout waiting for power up to complete\n");
 		ret = -EAGAIN;
 		goto out;
 	}
@@ -747,20 +691,12 @@ int cnss_idle_restart(struct device *dev)
 		goto out;
 	}
 
-	timeout = cnss_get_timeout(plat_priv, CNSS_TIMEOUT_IDLE_RESTART);
+	timeout = cnss_get_boot_timeout(dev);
 	ret = wait_for_completion_timeout(&plat_priv->power_up_complete,
-					  msecs_to_jiffies(timeout));
-	if (plat_priv->power_up_error) {
-		ret = plat_priv->power_up_error;
-		clear_bit(CNSS_DRIVER_IDLE_RESTART, &plat_priv->driver_state);
-		cnss_pr_dbg("Power up error:%d, exiting\n",
-			    plat_priv->power_up_error);
-		goto out;
-	}
-
+					  msecs_to_jiffies((timeout << 1) +
+							   WLAN_WD_TIMEOUT_MS));
 	if (!ret) {
-		cnss_pr_err("Timeout (%ums) waiting for idle restart to complete\n",
-			    timeout);
+		cnss_pr_err("Timeout waiting for idle restart to complete\n");
 		ret = -ETIMEDOUT;
 		goto out;
 	}
@@ -784,7 +720,6 @@ EXPORT_SYMBOL(cnss_idle_restart);
 int cnss_idle_shutdown(struct device *dev)
 {
 	struct cnss_plat_data *plat_priv = cnss_bus_dev_to_plat_priv(dev);
-	unsigned int timeout;
 	int ret;
 
 	if (!plat_priv) {
@@ -804,12 +739,10 @@ int cnss_idle_shutdown(struct device *dev)
 		goto skip_wait;
 
 	reinit_completion(&plat_priv->recovery_complete);
-	timeout = cnss_get_timeout(plat_priv, CNSS_TIMEOUT_RECOVERY);
 	ret = wait_for_completion_timeout(&plat_priv->recovery_complete,
-					  msecs_to_jiffies(timeout));
+					  RECOVERY_TIMEOUT);
 	if (!ret) {
-		cnss_pr_err("Timeout (%ums) waiting for recovery to complete\n",
-			    timeout);
+		cnss_pr_err("Timeout waiting for recovery to complete\n");
 		CNSS_ASSERT(0);
 	}
 
@@ -858,7 +791,6 @@ static void cnss_put_resources(struct cnss_plat_data *plat_priv)
 	cnss_put_vreg_type(plat_priv, CNSS_VREG_PRIM);
 }
 
-#ifdef CONFIG_MSM_SUBSYSTEM_RESTART
 static int cnss_modem_notifier_nb(struct notifier_block *nb,
 				  unsigned long code,
 				  void *ss_handle)
@@ -1050,40 +982,6 @@ static int cnss_subsys_ramdump(int enable,
 	return cnss_bus_dev_ramdump(plat_priv);
 }
 
-static void cnss_recovery_work_handler(struct work_struct *work)
-{
-}
-#else
-static int cnss_register_esoc(struct cnss_plat_data *plat_priv) { return 0; }
-static void cnss_unregister_esoc(struct cnss_plat_data *plat_priv) { }
-
-static void cnss_recovery_work_handler(struct work_struct *work)
-{
-	struct cnss_plat_data *plat_priv =
-		container_of(work, struct cnss_plat_data, recovery_work);
-
-	if (!plat_priv->recovery_enabled)
-		panic("subsys-restart: Resetting the SoC wlan crashed\n");
-
-	cnss_bus_dev_shutdown(plat_priv);
-	cnss_bus_dev_ramdump(plat_priv);
-	msleep(RECOVERY_DELAY_MS);
-	cnss_bus_dev_powerup(plat_priv);
-}
-
-void cnss_device_crashed(struct device *dev)
-{
-	struct cnss_plat_data *plat_priv = cnss_bus_dev_to_plat_priv(dev);
-
-	if (!plat_priv)
-		return;
-
-	set_bit(CNSS_DRIVER_RECOVERY, &plat_priv->driver_state);
-	schedule_work(&plat_priv->recovery_work);
-}
-EXPORT_SYMBOL(cnss_device_crashed);
-#endif /* CONFIG_MSM_SUBSYSTEM_RESTART */
-
 void *cnss_get_virt_ramdump_mem(struct device *dev, unsigned long *size)
 {
 	struct cnss_plat_data *plat_priv = cnss_bus_dev_to_plat_priv(dev);
@@ -1118,6 +1016,9 @@ static const char *cnss_recovery_reason_to_str(enum cnss_recovery_reason reason)
 static int cnss_do_recovery(struct cnss_plat_data *plat_priv,
 			    enum cnss_recovery_reason reason)
 {
+	struct cnss_subsys_info *subsys_info =
+		&plat_priv->subsys_info;
+
 	plat_priv->recovery_count++;
 
 	if (plat_priv->device_id == QCA6174_DEVICE_ID)
@@ -1137,14 +1038,6 @@ static int cnss_do_recovery(struct cnss_plat_data *plat_priv,
 		if (test_bit(LINK_DOWN_SELF_RECOVERY,
 			     &plat_priv->ctrl_params.quirks))
 			goto self_recovery;
-		if (!cnss_bus_recover_link_down(plat_priv)) {
-			/* clear recovery bit here to avoid skipping
-			 * the recovery work for RDDM later
-			 */
-			clear_bit(CNSS_DRIVER_RECOVERY,
-				  &plat_priv->driver_state);
-			return 0;
-		}
 		break;
 	case CNSS_REASON_RDDM:
 		cnss_bus_collect_dump_info(plat_priv, false);
@@ -1158,18 +1051,16 @@ static int cnss_do_recovery(struct cnss_plat_data *plat_priv,
 		break;
 	}
 
-	cnss_bus_device_crashed(plat_priv);
+	if (!subsys_info->subsys_device)
+		return 0;
+
+	subsys_set_crash_status(subsys_info->subsys_device, true);
+	subsystem_restart_dev(subsys_info->subsys_device);
 
 	return 0;
 
 self_recovery:
-	cnss_pr_dbg("Going for self recovery\n");
 	cnss_bus_dev_shutdown(plat_priv);
-
-	if (test_bit(LINK_DOWN_SELF_RECOVERY, &plat_priv->ctrl_params.quirks))
-		clear_bit(LINK_DOWN_SELF_RECOVERY,
-			  &plat_priv->ctrl_params.quirks);
-
 	cnss_bus_dev_powerup(plat_priv);
 
 	return 0;
@@ -1252,8 +1143,7 @@ void cnss_schedule_recovery(struct device *dev,
 	struct cnss_recovery_data *data;
 	int gfp = GFP_KERNEL;
 
-	if (!test_bit(CNSS_DEV_ERR_NOTIFY, &plat_priv->driver_state) &&
-	    test_bit(CNSS_QMI_WLFW_CONNECTED, &plat_priv->driver_state))
+	if (!test_bit(CNSS_DEV_ERR_NOTIFY, &plat_priv->driver_state))
 		cnss_bus_update_status(plat_priv, CNSS_FW_DOWN);
 
 	if (test_bit(CNSS_DRIVER_UNLOADING, &plat_priv->driver_state) ||
@@ -1276,44 +1166,9 @@ void cnss_schedule_recovery(struct device *dev,
 }
 EXPORT_SYMBOL(cnss_schedule_recovery);
 
-int cnss_force_fw_assert_async(struct device *dev)
-{
-	struct cnss_plat_data *plat_priv = cnss_bus_dev_to_plat_priv(dev);
-
-	if (!plat_priv) {
-		cnss_pr_err("plat_priv is NULL\n");
-		return -ENODEV;
-	}
-
-	if (plat_priv->device_id == QCA6174_DEVICE_ID) {
-		cnss_pr_info("Forced FW assert is not supported\n");
-		return -EOPNOTSUPP;
-	}
-
-	if (cnss_bus_is_device_down(plat_priv)) {
-		cnss_pr_info("Device is already in bad state, ignore force assert\n");
-		return 0;
-	}
-
-	if (test_bit(CNSS_DRIVER_RECOVERY, &plat_priv->driver_state)) {
-		cnss_pr_info("Recovery is already in progress, ignore forced FW assert\n");
-		return 0;
-	}
-
-	cnss_pr_info("Force assert (async)\n");
-
-	cnss_driver_event_post(plat_priv,
-			       CNSS_DRIVER_EVENT_FORCE_FW_ASSERT,
-			       0, NULL);
-
-	return 0;
-}
-EXPORT_SYMBOL(cnss_force_fw_assert_async);
-
 int cnss_force_fw_assert(struct device *dev)
 {
 	struct cnss_plat_data *plat_priv = cnss_bus_dev_to_plat_priv(dev);
-	bool post = (in_interrupt() || irqs_disabled());
 
 	if (!plat_priv) {
 		cnss_pr_err("plat_priv is NULL\n");
@@ -1335,9 +1190,7 @@ int cnss_force_fw_assert(struct device *dev)
 		return 0;
 	}
 
-	cnss_pr_info("Force assert (%s)\n", post ? "async" : "sync");
-
-	if (post)
+	if (in_interrupt() || irqs_disabled())
 		cnss_driver_event_post(plat_priv,
 				       CNSS_DRIVER_EVENT_FORCE_FW_ASSERT,
 				       0, NULL);
@@ -1351,7 +1204,6 @@ EXPORT_SYMBOL(cnss_force_fw_assert);
 int cnss_force_collect_rddm(struct device *dev)
 {
 	struct cnss_plat_data *plat_priv = cnss_bus_dev_to_plat_priv(dev);
-	unsigned int timeout;
 	int ret = 0;
 
 	if (!plat_priv) {
@@ -1387,14 +1239,11 @@ int cnss_force_collect_rddm(struct device *dev)
 		return ret;
 
 	reinit_completion(&plat_priv->rddm_complete);
-	timeout = cnss_get_timeout(plat_priv, CNSS_TIMEOUT_RDDM);
-	ret = wait_for_completion_timeout(&plat_priv->rddm_complete,
-					  msecs_to_jiffies(timeout));
-	if (!ret) {
-		cnss_pr_err("Timeout (%ums) waiting for RDDM to complete\n",
-			    timeout);
+	ret = wait_for_completion_timeout
+		(&plat_priv->rddm_complete,
+		 msecs_to_jiffies(CNSS_RDDM_TIMEOUT_MS));
+	if (!ret)
 		ret = -ETIMEDOUT;
-	}
 
 	return ret;
 }
@@ -1763,7 +1612,6 @@ int cnss_va_to_pa(struct device *dev, size_t size, void *va, dma_addr_t dma,
 	return 0;
 }
 
-#ifdef CONFIG_MSM_SUBSYSTEM_RESTART
 int cnss_register_subsys(struct cnss_plat_data *plat_priv)
 {
 	int ret = 0;
@@ -1815,213 +1663,6 @@ void cnss_unregister_subsys(struct cnss_plat_data *plat_priv)
 	subsys_unregister(subsys_info->subsys_device);
 }
 
-static void *cnss_create_ramdump_device(struct cnss_plat_data *plat_priv)
-{
-	struct cnss_subsys_info *subsys_info = &plat_priv->subsys_info;
-
-	return create_ramdump_device(subsys_info->subsys_desc.name,
-				     subsys_info->subsys_desc.dev);
-}
-
-static void cnss_destroy_ramdump_device(struct cnss_plat_data *plat_priv,
-					void *ramdump_dev)
-{
-	destroy_ramdump_device(ramdump_dev);
-}
-
-int cnss_do_ramdump(struct cnss_plat_data *plat_priv)
-{
-	struct cnss_ramdump_info *ramdump_info = &plat_priv->ramdump_info;
-	struct ramdump_segment segment;
-
-	memset(&segment, 0, sizeof(segment));
-	segment.v_address = ramdump_info->ramdump_va;
-	segment.size = ramdump_info->ramdump_size;
-
-	return do_ramdump(ramdump_info->ramdump_dev, &segment, 1);
-}
-
-int cnss_do_elf_ramdump(struct cnss_plat_data *plat_priv)
-{
-	struct cnss_ramdump_info_v2 *info_v2 = &plat_priv->ramdump_info_v2;
-	struct cnss_dump_data *dump_data = &info_v2->dump_data;
-	struct cnss_dump_seg *dump_seg = info_v2->dump_data_vaddr;
-	struct ramdump_segment *ramdump_segs, *s;
-	struct cnss_dump_meta_info meta_info = {0};
-	int i, ret = 0;
-
-	ramdump_segs = kcalloc(dump_data->nentries + 1,
-			       sizeof(*ramdump_segs),
-			       GFP_KERNEL);
-	if (!ramdump_segs)
-		return -ENOMEM;
-
-	s = ramdump_segs + 1;
-	for (i = 0; i < dump_data->nentries; i++) {
-		if (dump_seg->type >= CNSS_FW_DUMP_TYPE_MAX) {
-			cnss_pr_err("Unsupported dump type: %d",
-				    dump_seg->type);
-			continue;
-		}
-
-		if (meta_info.entry[dump_seg->type].entry_start == 0) {
-			meta_info.entry[dump_seg->type].type = dump_seg->type;
-			meta_info.entry[dump_seg->type].entry_start = i + 1;
-		}
-		meta_info.entry[dump_seg->type].entry_num++;
-
-		s->address = dump_seg->address;
-		s->v_address = dump_seg->v_address;
-		s->size = dump_seg->size;
-		s++;
-		dump_seg++;
-	}
-
-	meta_info.magic = CNSS_RAMDUMP_MAGIC;
-	meta_info.version = CNSS_RAMDUMP_VERSION;
-	meta_info.chipset = plat_priv->device_id;
-	meta_info.total_entries = CNSS_FW_DUMP_TYPE_MAX;
-
-	ramdump_segs->v_address = &meta_info;
-	ramdump_segs->size = sizeof(meta_info);
-
-	ret = do_elf_ramdump(info_v2->ramdump_dev, ramdump_segs,
-			     dump_data->nentries + 1);
-	kfree(ramdump_segs);
-
-	return ret;
-}
-#else
-static int cnss_panic_handler(struct notifier_block *nb, unsigned long action,
-			      void *data)
-{
-	struct cnss_plat_data *plat_priv =
-		container_of(nb, struct cnss_plat_data, panic_nb);
-
-	cnss_bus_dev_crash_shutdown(plat_priv);
-
-	return NOTIFY_DONE;
-}
-
-int cnss_register_subsys(struct cnss_plat_data *plat_priv)
-{
-	int ret;
-
-	if (!plat_priv)
-		return -ENODEV;
-
-	plat_priv->panic_nb.notifier_call = cnss_panic_handler;
-	ret = atomic_notifier_chain_register(&panic_notifier_list,
-					     &plat_priv->panic_nb);
-	if (ret) {
-		cnss_pr_err("Failed to register panic handler\n");
-		return -EINVAL;
-	}
-
-	return 0;
-}
-
-void cnss_unregister_subsys(struct cnss_plat_data *plat_priv)
-{
-	int ret;
-
-	ret = atomic_notifier_chain_unregister(&panic_notifier_list,
-					       &plat_priv->panic_nb);
-	if (ret)
-		cnss_pr_err("Failed to unregister panic handler\n");
-}
-
-static void *cnss_create_ramdump_device(struct cnss_plat_data *plat_priv)
-{
-	return &plat_priv->plat_dev->dev;
-}
-
-static void cnss_destroy_ramdump_device(struct cnss_plat_data *plat_priv,
-					void *ramdump_dev)
-{
-}
-
-#ifdef CONFIG_SUBSYSTEM_RAMDUMP
-int cnss_do_ramdump(struct cnss_plat_data *plat_priv)
-{
-	struct cnss_ramdump_info *ramdump_info = &plat_priv->ramdump_info;
-	struct qcom_dump_segment segment;
-	struct list_head head;
-
-	INIT_LIST_HEAD(&head);
-	memset(&segment, 0, sizeof(segment));
-	segment.va = ramdump_info->ramdump_va;
-	segment.size = ramdump_info->ramdump_size;
-	list_add(&segment.node, &head);
-
-	return do_dump(&head, ramdump_info->ramdump_dev);
-}
-
-int cnss_do_elf_ramdump(struct cnss_plat_data *plat_priv)
-{
-	struct cnss_ramdump_info_v2 *info_v2 = &plat_priv->ramdump_info_v2;
-	struct cnss_dump_data *dump_data = &info_v2->dump_data;
-	struct cnss_dump_seg *dump_seg = info_v2->dump_data_vaddr;
-	struct qcom_dump_segment *seg;
-	struct cnss_dump_meta_info meta_info = {0};
-	struct list_head head;
-	int i, ret = 0;
-
-	INIT_LIST_HEAD(&head);
-	for (i = 0; i < dump_data->nentries; i++) {
-		if (dump_seg->type >= CNSS_FW_DUMP_TYPE_MAX) {
-			cnss_pr_err("Unsupported dump type: %d",
-				    dump_seg->type);
-			continue;
-		}
-
-		if (meta_info.entry[dump_seg->type].entry_start == 0) {
-			meta_info.entry[dump_seg->type].type = dump_seg->type;
-			meta_info.entry[dump_seg->type].entry_start = i + 1;
-		}
-		meta_info.entry[dump_seg->type].entry_num++;
-
-		seg = kcalloc(1, sizeof(*seg), GFP_KERNEL);
-		seg->da = dump_seg->address;
-		seg->va = dump_seg->v_address;
-		seg->size = dump_seg->size;
-		list_add_tail(&seg->node, &head);
-		dump_seg++;
-	}
-
-	meta_info.magic = CNSS_RAMDUMP_MAGIC;
-	meta_info.version = CNSS_RAMDUMP_VERSION;
-	meta_info.chipset = plat_priv->device_id;
-	meta_info.total_entries = CNSS_FW_DUMP_TYPE_MAX;
-
-	seg = kcalloc(1, sizeof(*seg), GFP_KERNEL);
-	seg->va = &meta_info;
-	seg->size = sizeof(meta_info);
-	list_add(&seg->node, &head);
-
-	ret = do_elf_dump(&head, info_v2->ramdump_dev);
-
-	while (!list_empty(&head)) {
-		seg = list_first_entry(&head, struct qcom_dump_segment, node);
-		list_del(&seg->node);
-		kfree(seg);
-	}
-
-	return ret;
-}
-#else
-int cnss_do_ramdump(struct cnss_plat_data *plat_priv)
-{
-	return 0;
-}
-
-int cnss_do_elf_ramdump(struct cnss_plat_data *plat_priv)
-{
-	return 0;
-}
-#endif /* CONFIG_SUBSYSTEM_RAMDUMP */
-#endif /* CONFIG_MSM_SUBSYSTEM_RESTART */
-
 static int cnss_init_dump_entry(struct cnss_plat_data *plat_priv)
 {
 	struct cnss_ramdump_info *ramdump_info;
@@ -2045,10 +1686,12 @@ static int cnss_register_ramdump_v1(struct cnss_plat_data *plat_priv)
 {
 	int ret = 0;
 	struct device *dev;
+	struct cnss_subsys_info *subsys_info;
 	struct cnss_ramdump_info *ramdump_info;
 	u32 ramdump_size = 0;
 
 	dev = &plat_priv->plat_dev->dev;
+	subsys_info = &plat_priv->subsys_info;
 	ramdump_info = &plat_priv->ramdump_info;
 
 	if (of_property_read_u32(dev->of_node, "qcom,wlan-ramdump-dynamic",
@@ -2076,7 +1719,9 @@ static int cnss_register_ramdump_v1(struct cnss_plat_data *plat_priv)
 		goto free_ramdump;
 	}
 
-	ramdump_info->ramdump_dev = cnss_create_ramdump_device(plat_priv);
+	ramdump_info->ramdump_dev =
+		create_ramdump_device(subsys_info->subsys_desc.name,
+				      subsys_info->subsys_desc.dev);
 	if (!ramdump_info->ramdump_dev) {
 		cnss_pr_err("Failed to create ramdump device!");
 		ret = -ENOMEM;
@@ -2100,8 +1745,7 @@ static void cnss_unregister_ramdump_v1(struct cnss_plat_data *plat_priv)
 	ramdump_info = &plat_priv->ramdump_info;
 
 	if (ramdump_info->ramdump_dev)
-		cnss_destroy_ramdump_device(plat_priv,
-					    ramdump_info->ramdump_dev);
+		destroy_ramdump_device(ramdump_info->ramdump_dev);
 
 	if (ramdump_info->ramdump_va)
 		dma_free_coherent(dev, ramdump_info->ramdump_size,
@@ -2112,12 +1756,14 @@ static void cnss_unregister_ramdump_v1(struct cnss_plat_data *plat_priv)
 static int cnss_register_ramdump_v2(struct cnss_plat_data *plat_priv)
 {
 	int ret = 0;
+	struct cnss_subsys_info *subsys_info;
 	struct cnss_ramdump_info_v2 *info_v2;
 	struct cnss_dump_data *dump_data;
 	struct msm_dump_entry dump_entry;
 	struct device *dev = &plat_priv->plat_dev->dev;
 	u32 ramdump_size = 0;
 
+	subsys_info = &plat_priv->subsys_info;
 	info_v2 = &plat_priv->ramdump_info_v2;
 	dump_data = &info_v2->dump_data;
 
@@ -2147,7 +1793,9 @@ static int cnss_register_ramdump_v2(struct cnss_plat_data *plat_priv)
 		goto free_ramdump;
 	}
 
-	info_v2->ramdump_dev = cnss_create_ramdump_device(plat_priv);
+	info_v2->ramdump_dev =
+		create_ramdump_device(subsys_info->subsys_desc.name,
+				      subsys_info->subsys_desc.dev);
 	if (!info_v2->ramdump_dev) {
 		cnss_pr_err("Failed to create ramdump device!\n");
 		ret = -ENOMEM;
@@ -2169,7 +1817,7 @@ static void cnss_unregister_ramdump_v2(struct cnss_plat_data *plat_priv)
 	info_v2 = &plat_priv->ramdump_info_v2;
 
 	if (info_v2->ramdump_dev)
-		cnss_destroy_ramdump_device(plat_priv, info_v2->ramdump_dev);
+		destroy_ramdump_device(info_v2->ramdump_dev);
 
 	kfree(info_v2->dump_data_vaddr);
 	info_v2->dump_data_vaddr = NULL;
@@ -2248,7 +1896,7 @@ int cnss_minidump_add_region(struct cnss_plat_data *plat_priv,
 		    md_entry.name, va, &pa, size);
 
 	ret = msm_minidump_add_region(&md_entry);
-	if (ret < 0)
+	if (ret)
 		cnss_pr_err("Failed to add mini dump region, err = %d\n", ret);
 
 	return ret;
@@ -2330,64 +1978,11 @@ static void cnss_unregister_bus_scale(struct cnss_plat_data *plat_priv)
 		msm_bus_scale_unregister_client(bus_bw_info->bus_client);
 }
 
-static ssize_t qtime_sync_period_show(struct device *dev,
-				      struct device_attribute *attr,
-				      char *buf)
-{
-	struct cnss_plat_data *plat_priv = dev_get_drvdata(dev);
-
-	return scnprintf(buf, PAGE_SIZE, "%u\n",
-			plat_priv->ctrl_params.time_sync_period);
-}
-
-static ssize_t qtime_sync_period_store(struct device *dev,
-				       struct device_attribute *attr,
-				       const char *buf, size_t count)
-{
-	unsigned int qtime_sync_period = 0;
-
-	if (sscanf(buf, "%du", &qtime_sync_period) != 1) {
-		cnss_pr_err("Invalid qtime sync sysfs command\n");
-		return -EINVAL;
-	}
-
-	if (qtime_sync_period >= CNSS_MIN_TIME_SYNC_PERIOD)
-		cnss_pci_update_qtime_sync_period(dev, qtime_sync_period);
-
-	return count;
-}
-
-static ssize_t recovery_store(struct device *dev,
-			      struct device_attribute *attr,
+static ssize_t shutdown_store(struct kobject *kobj,
+			      struct kobj_attribute *attr,
 			      const char *buf, size_t count)
 {
-	struct cnss_plat_data *plat_priv = dev_get_drvdata(dev);
-	unsigned int recovery = 0;
-
-	if (!plat_priv)
-		return -ENODEV;
-
-	if (sscanf(buf, "%du", &recovery) != 1) {
-		cnss_pr_err("Invalid recovery sysfs command\n");
-		return -EINVAL;
-	}
-
-	if (recovery)
-		plat_priv->recovery_enabled = true;
-	else
-		plat_priv->recovery_enabled = false;
-
-	cnss_pr_dbg("%s WLAN recovery, count is %zu\n",
-		    plat_priv->recovery_enabled ? "Enable" : "Disable", count);
-
-	return count;
-}
-
-static ssize_t shutdown_store(struct device *dev,
-			      struct device_attribute *attr,
-			      const char *buf, size_t count)
-{
-	struct cnss_plat_data *plat_priv = dev_get_drvdata(dev);
+	struct cnss_plat_data *plat_priv = cnss_get_plat_priv(NULL);
 
 	if (plat_priv) {
 		set_bit(CNSS_IN_REBOOT, &plat_priv->driver_state);
@@ -2414,13 +2009,13 @@ static ssize_t fs_ready_store(struct device *dev,
 	cnss_pr_dbg("File system is ready, fs_ready is %d, count is %zu\n",
 		    fs_ready, count);
 
-	if (!plat_priv) {
-		cnss_pr_err("plat_priv is NULL!\n");
+	if (test_bit(QMI_BYPASS, &plat_priv->ctrl_params.quirks)) {
+		cnss_pr_dbg("QMI is bypassed.\n");
 		return count;
 	}
 
-	if (test_bit(QMI_BYPASS, &plat_priv->ctrl_params.quirks)) {
-		cnss_pr_dbg("QMI is bypassed.\n");
+	if (!plat_priv) {
+		cnss_pr_err("plat_priv is NULL!\n");
 		return count;
 	}
 
@@ -2444,70 +2039,54 @@ static ssize_t fs_ready_store(struct device *dev,
 	return count;
 }
 
+static struct kobj_attribute shutdown_attribute = __ATTR_WO(shutdown);
 static DEVICE_ATTR_WO(fs_ready);
-static DEVICE_ATTR_WO(shutdown);
-static DEVICE_ATTR_WO(recovery);
-static DEVICE_ATTR_RW(qtime_sync_period);
 
-static struct attribute *cnss_attrs[] = {
-	&dev_attr_fs_ready.attr,
-	&dev_attr_shutdown.attr,
-	&dev_attr_recovery.attr,
-	&dev_attr_qtime_sync_period.attr,
-	NULL,
-};
-
-static struct attribute_group cnss_attr_group = {
-	.attrs = cnss_attrs,
-};
-
-static int cnss_create_sysfs_link(struct cnss_plat_data *plat_priv)
+static int cnss_create_shutdown_sysfs(struct cnss_plat_data *plat_priv)
 {
-	struct device *dev = &plat_priv->plat_dev->dev;
-	int ret;
+	int ret = 0;
 
-	ret = sysfs_create_link(kernel_kobj, &dev->kobj, "cnss");
-	if (ret) {
-		cnss_pr_err("Failed to create cnss link, err = %d\n",
-			    ret);
-		goto out;
+	plat_priv->shutdown_kobj = kobject_create_and_add("shutdown_wlan",
+							  kernel_kobj);
+	if (!plat_priv->shutdown_kobj) {
+		cnss_pr_err("Failed to create shutdown_wlan kernel object\n");
+		return -ENOMEM;
 	}
 
-	/* This is only for backward compatibility. */
-	ret = sysfs_create_link(kernel_kobj, &dev->kobj, "shutdown_wlan");
+	ret = sysfs_create_file(plat_priv->shutdown_kobj,
+				&shutdown_attribute.attr);
 	if (ret) {
-		cnss_pr_err("Failed to create shutdown_wlan link, err = %d\n",
+		cnss_pr_err("Failed to create sysfs shutdown file, err = %d\n",
 			    ret);
-		goto rm_cnss_link;
+		kobject_put(plat_priv->shutdown_kobj);
+		plat_priv->shutdown_kobj = NULL;
 	}
 
-	return 0;
-
-rm_cnss_link:
-	sysfs_remove_link(kernel_kobj, "cnss");
-out:
 	return ret;
 }
 
-static void cnss_remove_sysfs_link(struct cnss_plat_data *plat_priv)
+static void cnss_remove_shutdown_sysfs(struct cnss_plat_data *plat_priv)
 {
-	sysfs_remove_link(kernel_kobj, "shutdown_wlan");
-	sysfs_remove_link(kernel_kobj, "cnss");
+	if (plat_priv->shutdown_kobj) {
+		sysfs_remove_file(plat_priv->shutdown_kobj,
+				  &shutdown_attribute.attr);
+		kobject_put(plat_priv->shutdown_kobj);
+		plat_priv->shutdown_kobj = NULL;
+	}
 }
 
 static int cnss_create_sysfs(struct cnss_plat_data *plat_priv)
 {
 	int ret = 0;
 
-	ret = devm_device_add_group(&plat_priv->plat_dev->dev,
-				    &cnss_attr_group);
+	ret = device_create_file(&plat_priv->plat_dev->dev, &dev_attr_fs_ready);
 	if (ret) {
-		cnss_pr_err("Failed to create cnss device group, err = %d\n",
+		cnss_pr_err("Failed to create device fs_ready file, err = %d\n",
 			    ret);
 		goto out;
 	}
 
-	cnss_create_sysfs_link(plat_priv);
+	cnss_create_shutdown_sysfs(plat_priv);
 
 	return 0;
 out:
@@ -2516,8 +2095,8 @@ out:
 
 static void cnss_remove_sysfs(struct cnss_plat_data *plat_priv)
 {
-	cnss_remove_sysfs_link(plat_priv);
-	devm_device_remove_group(&plat_priv->plat_dev->dev, &cnss_attr_group);
+	cnss_remove_shutdown_sysfs(plat_priv);
+	device_remove_file(&plat_priv->plat_dev->dev, &dev_attr_fs_ready);
 }
 
 static int cnss_event_work_init(struct cnss_plat_data *plat_priv)
@@ -2579,7 +2158,6 @@ static int cnss_misc_init(struct cnss_plat_data *plat_priv)
 		cnss_pr_err("Failed to init platform device wakeup source, err = %d\n",
 			    ret);
 
-	INIT_WORK(&plat_priv->recovery_work, cnss_recovery_work_handler);
 	init_completion(&plat_priv->power_up_complete);
 	init_completion(&plat_priv->cal_complete);
 	init_completion(&plat_priv->rddm_complete);

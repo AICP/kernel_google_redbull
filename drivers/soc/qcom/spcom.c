@@ -38,7 +38,7 @@
  * User Space Request & Response are synchronous.
  * read() & write() operations are blocking until completed or terminated.
  */
-#define pr_fmt(fmt)	KBUILD_MODNAME ":%s: " fmt, __func__
+#define pr_fmt(fmt)	KBUILD_MODNAME ": " fmt
 
 #include <linux/kernel.h>	/* min()             */
 #include <linux/module.h>	/* MODULE_LICENSE    */

@@ -259,7 +259,6 @@
 
 /* 60-FB reserved */
 
-#define SDHCI_PRESET_FOR_HIGH_SPEED	0x64
 #define SDHCI_PRESET_FOR_SDR12 0x66
 #define SDHCI_PRESET_FOR_SDR25 0x68
 #define SDHCI_PRESET_FOR_SDR50 0x6A
@@ -548,11 +547,6 @@ struct sdhci_host {
  * eMMC tuning commands.
  */
 #define SDHCI_QUIRK2_USE_PIO_FOR_EMMC_TUNING (1 << 29)
-
-/*
- * Use QTI specific SDCC debug feature.
- */
-#define SDHCI_QUIRK2_USE_DBG_FEATURE (1 << 30)
 
 	int irq;		/* Device IRQ */
 	void __iomem *ioaddr;	/* Mapped address */

@@ -43,15 +43,10 @@
 #define DRV_NAME "rt5514-spi"
 #define COPY_WORK_DELAY_TIME_MS 100
 #define WAKEUP_TIMEOUT	5000
-#define MAX_STREAM_FLAG RT5514_ID_MAX
-#define RT5514_ID_BE_START RT5514_ID_MAX
+#define MAX_STREAM_FLAG	3
 
 void (*rt5514_watchdog_handler_cb)(void) = NULL;
 EXPORT_SYMBOL_GPL(rt5514_watchdog_handler_cb);
-bool (*rt5514_buffer_status_cb)(void) = NULL;
-EXPORT_SYMBOL_GPL(rt5514_buffer_status_cb);
-int (*rt5514_zlatency_cb)(void) = NULL;
-EXPORT_SYMBOL_GPL(rt5514_zlatency_cb);
 struct regmap *rt5514_g_i2c_regmap;
 EXPORT_SYMBOL_GPL(rt5514_g_i2c_regmap);
 
@@ -69,15 +64,13 @@ struct rt5514_dsp {
 	struct device *dev;
 	struct snd_soc_component *component;
 	struct delayed_work copy_work_0, copy_work_1, copy_work_2, start_work,
-		adc_work, copy_work_3, zlatency_work;
+		adc_work;
 	struct mutex dma_lock;
-	struct snd_pcm_substream *substream[MAX_STREAM_FLAG];
-	unsigned int buf_base[MAX_STREAM_FLAG], buf_limit[MAX_STREAM_FLAG],
-		buf_rp[MAX_STREAM_FLAG], buf_rp_addr[MAX_STREAM_FLAG];
+	struct snd_pcm_substream *substream[3];
+	unsigned int buf_base[3], buf_limit[3], buf_rp[3], buf_rp_addr[3];
 	unsigned int stream_flag[MAX_STREAM_FLAG];
 	unsigned int hotword_ignore_ms, musdet_ignore_ms;
-	size_t buf_size[MAX_STREAM_FLAG], get_size[MAX_STREAM_FLAG],
-		dma_offset[MAX_STREAM_FLAG];
+	size_t buf_size[3], get_size[2], dma_offset[3];
 };
 
 static const struct snd_pcm_hardware rt5514_spi_pcm_hardware = {
@@ -112,16 +105,16 @@ static const struct snd_kcontrol_new st2_mux[] = {
 
 static struct snd_soc_dapm_widget rt5514_spi_dapm_widgets[] = {
 	/* Stream widgets */
-	SND_SOC_DAPM_AIF_OUT("AIF_SPI_FE", "SoundTrigger Capture", 0, 0, 0, 0),
-	SND_SOC_DAPM_AIF_OUT("AIF_SPI_FE2", "SoundTrigger Capture 2", 0, 0, 0,
-			     0),
-	SND_SOC_DAPM_AIF_OUT("AIF_SPI_FE3", "ADC Capture", 0, 0, 0, 0),
-	SND_SOC_DAPM_AIF_OUT("AIF_SPI_FE4", "ZLatency Capture", 0, 0, 0, 0),
+	SND_SOC_DAPM_AIF_OUT("AIF_SPI_FE",
+			"SoundTrigger Capture", 0, 0, 0, 0),
+	SND_SOC_DAPM_AIF_OUT("AIF_SPI_FE2",
+			"SoundTrigger Capture 2", 0, 0, 0, 0),
+	SND_SOC_DAPM_AIF_OUT("AIF_SPI_FE3",
+			"ADC Capture", 0, 0, 0, 0),
 
 	SND_SOC_DAPM_AIF_IN("AIF_SPI_BE", "SPI Capture", 0, 0, 0, 0),
 	SND_SOC_DAPM_AIF_IN("AIF_SPI_BE2", "SPI Capture 2", 0, 0, 0, 0),
 	SND_SOC_DAPM_AIF_IN("AIF_SPI_BE3", "SPI Capture 3", 0, 0, 0, 0),
-	SND_SOC_DAPM_AIF_IN("AIF_SPI_BE4", "SPI Capture 4", 0, 0, 0, 0),
 
 	SND_SOC_DAPM_MICBIAS("LDO_SOURCE", SND_SOC_NOPM, 0, 0),
 	SND_SOC_DAPM_MUX("SoundTrigger1 Enable", SND_SOC_NOPM, 0, 0, st1_mux),
@@ -133,34 +126,30 @@ static struct snd_soc_dapm_widget rt5514_spi_dapm_widgets[] = {
 };
 
 static const struct snd_soc_dapm_route intercon_common[] = {
-	{ "AIF_SPI_FE", NULL, "AIF_SPI_BE" },
-	{ "AIF_SPI_FE2", NULL, "AIF_SPI_BE2" },
-	{ "AIF_SPI_FE3", NULL, "AIF_SPI_BE3" },
-	{ "AIF_SPI_FE4", NULL, "AIF_SPI_BE4" },
+	{"AIF_SPI_FE", NULL, "AIF_SPI_BE"},
+	{"AIF_SPI_FE2", NULL, "AIF_SPI_BE2"},
+	{"AIF_SPI_FE3", NULL, "AIF_SPI_BE3"},
 
-	{ "SoundTrigger1 Enable", "ON", "DSP_IN1" },
-	{ "SoundTrigger2 Enable", "ON", "DSP_IN2" },
+	{"SoundTrigger1 Enable", "ON", "DSP_IN1"},
+	{"SoundTrigger2 Enable", "ON", "DSP_IN2"},
 
-	{ "SoundTrigger Capture", NULL, "AIF_SPI_FE" },
-	{ "SoundTrigger Capture 2", NULL, "AIF_SPI_FE2" },
-	{ "ADC Capture", NULL, "AIF_SPI_FE3" },
-	{ "ZLatency Capture", NULL, "AIF_SPI_FE4" },
+	{"SoundTrigger Capture", NULL, "AIF_SPI_FE"},
+	{"SoundTrigger Capture 2", NULL, "AIF_SPI_FE2"},
+	{"ADC Capture", NULL, "AIF_SPI_FE3"},
 
-	{ "AIF_SPI_BE", NULL, "SoundTrigger1 Enable" },
-	{ "AIF_SPI_BE2", NULL, "SoundTrigger2 Enable" },
-	{ "AIF_SPI_BE3", NULL, "DSP_IN3" },
-	{ "AIF_SPI_BE4", NULL, "SoundTrigger1 Enable" },
+	{"AIF_SPI_BE", NULL, "SoundTrigger1 Enable"},
+	{"AIF_SPI_BE2", NULL, "SoundTrigger2 Enable"},
+	{"AIF_SPI_BE3", NULL, "DSP_IN3"},
 
-	{ "AIF_SPI_BE", NULL, "SPI Capture" },
-	{ "AIF_SPI_BE2", NULL, "SPI Capture 2" },
-	{ "AIF_SPI_BE3", NULL, "SPI Capture 3" },
-	{ "AIF_SPI_BE4", NULL, "SPI Capture 4" },
+	{"AIF_SPI_BE", NULL, "SPI Capture"},
+	{"AIF_SPI_BE2", NULL, "SPI Capture 2"},
+	{"AIF_SPI_BE3", NULL, "SPI Capture 3"},
 };
 
 static struct snd_soc_dai_driver rt5514_spi_dai[] = {
 	{
 		.name = "rt5514-dsp-fe-dai1",
-		.id = RT5514_ID_HOTWORD,
+		.id = 0,
 		.capture = {
 			.stream_name = "SoundTrigger Capture",
 			.aif_name = "AIF_SPI_FE",
@@ -172,7 +161,7 @@ static struct snd_soc_dai_driver rt5514_spi_dai[] = {
 	},
 	{
 		.name = "rt5514-dsp-fe-dai2",
-		.id = RT5514_ID_MUSDET,
+		.id = 1,
 		.capture = {
 			.stream_name = "SoundTrigger Capture 2",
 			.aif_name = "AIF_SPI_FE2",
@@ -184,7 +173,7 @@ static struct snd_soc_dai_driver rt5514_spi_dai[] = {
 	},
 	{
 		.name = "rt5514-dsp-fe-dai3",
-		.id = RT5514_ID_ADC,
+		.id = 2,
 		.capture = {
 			.stream_name = "ADC Capture",
 			.aif_name = "AIF_SPI_FE3",
@@ -195,20 +184,8 @@ static struct snd_soc_dai_driver rt5514_spi_dai[] = {
 		},
 	},
 	{
-		.name = "rt5514-dsp-fe-dai4",
-		.id = RT5514_ID_ZLATENCY,
-		.capture = {
-			.stream_name = "ZLatency Capture",
-			.aif_name = "AIF_SPI_FE4",
-			.channels_min = 1,
-			.channels_max = 2,
-			.rates = SNDRV_PCM_RATE_16000,
-			.formats = SNDRV_PCM_FMTBIT_S16_LE,
-		},
-	},
-	{
 		.name = "rt5514-dsp-be-dai1",
-		.id = RT5514_ID_BE_START + RT5514_ID_HOTWORD,
+		.id = 3,
 		.capture = {
 			.stream_name = "SPI Capture",
 			.aif_name = "AIF_SPI_BE",
@@ -220,7 +197,7 @@ static struct snd_soc_dai_driver rt5514_spi_dai[] = {
 	},
 	{
 		.name = "rt5514-dsp-be-dai2",
-		.id = RT5514_ID_BE_START + RT5514_ID_MUSDET,
+		.id = 4,
 		.capture = {
 			.stream_name = "SPI Capture 2",
 			.aif_name = "AIF_SPI_BE2",
@@ -232,25 +209,13 @@ static struct snd_soc_dai_driver rt5514_spi_dai[] = {
 	},
 	{
 		.name = "rt5514-dsp-be-dai3",
-		.id = RT5514_ID_BE_START + RT5514_ID_ADC,
+		.id = 5,
 		.capture = {
 			.stream_name = "SPI Capture 3",
 			.aif_name = "AIF_SPI_BE3",
 			.channels_min = 1,
 			.channels_max = 1,
 			.rates = SNDRV_PCM_RATE_8000,
-			.formats = SNDRV_PCM_FMTBIT_S16_LE,
-		},
-	},
-	{
-		.name = "rt5514-dsp-be-dai4",
-		.id = RT5514_ID_BE_START + RT5514_ID_ZLATENCY,
-		.capture = {
-			.stream_name = "SPI Capture 4",
-			.aif_name = "AIF_SPI_BE4",
-			.channels_min = 2,
-			.channels_max = 2,
-			.rates = SNDRV_PCM_RATE_16000,
 			.formats = SNDRV_PCM_FMTBIT_S16_LE,
 		},
 	},
@@ -828,127 +793,7 @@ done:
 	mutex_unlock(&rt5514_dsp->dma_lock);
 }
 
-static void rt5514_spi_copy_work_3(struct work_struct *work)
-{
-	struct rt5514_dsp *rt5514_dsp =
-		container_of(work, struct rt5514_dsp, copy_work_3.work);
-	struct snd_pcm_runtime *runtime;
-	size_t period_bytes, truncated_bytes = 0;
-	unsigned int cur_wp, remain_data;
-	u8 buf[8];
-	struct snd_soc_component *component = rt5514_dsp->component;
-
-	pm_wakeup_event(rt5514_dsp->dev, WAKEUP_TIMEOUT);
-	if (snd_power_wait(component->card->snd_card, SNDRV_CTL_POWER_D0)) {
-		dev_err(rt5514_dsp->dev, "%s: Request in suspend\n", __func__);
-		return;
-	}
-
-	mutex_lock(&rt5514_dsp->dma_lock);
-
-	rt5514_spi_request_switch(SPI_SWITCH_MASK_WORK_3, 1);
-
-	if (!rt5514_dsp->substream[3]) {
-		dev_err(rt5514_dsp->dev, "No pcm3 substream\n");
-		rt5514_spi_request_switch(SPI_SWITCH_MASK_WORK_3, 0);
-		goto done;
-	}
-
-	runtime = rt5514_dsp->substream[3]->runtime;
-	period_bytes = snd_pcm_lib_period_bytes(rt5514_dsp->substream[3]);
-	if (!period_bytes) {
-		rt5514_spi_request_switch(SPI_SWITCH_MASK_WORK_3, 0);
-		schedule_delayed_work(
-			&rt5514_dsp->copy_work_3,
-			msecs_to_jiffies(COPY_WORK_DELAY_TIME_MS));
-		goto done;
-	}
-
-	/* check if hw has space for one period_size */
-	if (snd_pcm_capture_hw_avail(runtime) <= runtime->period_size) {
-		rt5514_spi_request_switch(SPI_SWITCH_MASK_WORK_3, 0);
-		schedule_delayed_work(
-			&rt5514_dsp->copy_work_3,
-			msecs_to_jiffies(COPY_WORK_DELAY_TIME_MS));
-		goto done;
-	}
-
-	if (rt5514_dsp->buf_size[3] % period_bytes)
-		rt5514_dsp->buf_size[3] =
-			(rt5514_dsp->buf_size[3] / period_bytes) * period_bytes;
-
-	if (rt5514_dsp->get_size[3] >= rt5514_dsp->buf_size[3]) {
-		rt5514_spi_burst_read(rt5514_dsp->buf_rp_addr[3], (u8 *)&buf,
-				      sizeof(buf));
-		cur_wp = buf[0] | buf[1] << 8 | buf[2] << 16 | buf[3] << 24;
-		if ((cur_wp & 0xffe00000) != 0x4fe00000) {
-			rt5514_spi_request_switch(SPI_SWITCH_MASK_WORK_3, 0);
-			schedule_delayed_work(
-				&rt5514_dsp->copy_work_3,
-				msecs_to_jiffies(COPY_WORK_DELAY_TIME_MS));
-			goto done;
-		}
-
-		if (cur_wp >= rt5514_dsp->buf_rp[3])
-			remain_data = (cur_wp - rt5514_dsp->buf_rp[3]);
-		else
-			remain_data = (rt5514_dsp->buf_limit[3] -
-				       rt5514_dsp->buf_rp[3]) +
-				      (cur_wp - rt5514_dsp->buf_base[3]);
-
-		if (remain_data < period_bytes) {
-			rt5514_spi_request_switch(SPI_SWITCH_MASK_WORK_3, 0);
-			schedule_delayed_work(
-				&rt5514_dsp->copy_work_3,
-				msecs_to_jiffies(COPY_WORK_DELAY_TIME_MS));
-			goto done;
-		}
-	}
-
-	if (rt5514_dsp->buf_rp[3] + period_bytes <= rt5514_dsp->buf_limit[3]) {
-		rt5514_spi_burst_read(rt5514_dsp->buf_rp[3],
-				      runtime->dma_area +
-					      rt5514_dsp->dma_offset[3],
-				      period_bytes);
-
-		if (rt5514_dsp->buf_rp[3] + period_bytes ==
-		    rt5514_dsp->buf_limit[3])
-			rt5514_dsp->buf_rp[3] = rt5514_dsp->buf_base[3];
-		else
-			rt5514_dsp->buf_rp[3] += period_bytes;
-	} else {
-		truncated_bytes =
-			rt5514_dsp->buf_limit[3] - rt5514_dsp->buf_rp[3];
-		rt5514_spi_burst_read(rt5514_dsp->buf_rp[3],
-				      runtime->dma_area +
-					      rt5514_dsp->dma_offset[3],
-				      truncated_bytes);
-
-		rt5514_spi_burst_read(rt5514_dsp->buf_base[3],
-				      runtime->dma_area +
-					      rt5514_dsp->dma_offset[3] +
-					      truncated_bytes,
-				      period_bytes - truncated_bytes);
-
-		rt5514_dsp->buf_rp[3] = rt5514_dsp->buf_base[3] + period_bytes -
-					truncated_bytes;
-	}
-
-	rt5514_dsp->get_size[3] += period_bytes;
-	rt5514_dsp->dma_offset[3] += period_bytes;
-	if (rt5514_dsp->dma_offset[3] >= runtime->dma_bytes)
-		rt5514_dsp->dma_offset[3] = 0;
-
-	snd_pcm_period_elapsed(rt5514_dsp->substream[3]);
-
-	schedule_delayed_work(&rt5514_dsp->copy_work_3, msecs_to_jiffies(0));
-
-done:
-	mutex_unlock(&rt5514_dsp->dma_lock);
-}
-
-static void rt5514_schedule_copy(struct rt5514_dsp *rt5514_dsp,
-				 enum rt5514_work_mode mode)
+static void rt5514_schedule_copy(struct rt5514_dsp *rt5514_dsp, bool is_adc)
 {
 	u8 buf[8];
 	unsigned int base_addr, limit_addr, truncated_bytes,
@@ -958,23 +803,12 @@ static void rt5514_schedule_copy(struct rt5514_dsp *rt5514_dsp,
 
 	rt5514_spi_request_switch(SPI_SWITCH_MASK_COPY, 1);
 
-	if (mode == RT5514_MODE_ADC) {
+	if (is_adc) {
 		stream_flag = RT5514_DSP_STREAM_ADC;
 		base_addr = RT5514_BUFFER_ADC_BASE;
 		limit_addr = RT5514_BUFFER_ADC_LIMIT;
 		rt5514_dsp->buf_rp_addr[2] = RT5514_BUFFER_ADC_WP;
 		dev_info(rt5514_dsp->dev, "adc is streaming\n");
-	} else if (mode == RT5514_MODE_ZLATENCY) {
-		stream_flag = RT5514_DSP_STREAM_ZLATENCY;
-		base_addr = RT5514_BUFFER_VOICE_BASE;
-		limit_addr = RT5514_BUFFER_VOICE_LIMIT;
-		rt5514_dsp->buf_rp_addr[3] = RT5514_BUFFER_VOICE_WP;
-		rt5514_dsp->get_size[3] = 0;
-		/* Need calculate ignore buffer currently store 200 ms */
-		buf_ignore_size = (2000 - ZEOR_LATENCY_BUFFER_MS +
-				   rt5514_dsp->hotword_ignore_ms) *
-				  2 * 16;
-		dev_info(rt5514_dsp->dev, "zlatency is streaming\n");
 	} else {
 		rt5514_spi_burst_read(RT5514_HOTWORD_FLAG, (u8 *)&buf,
 			sizeof(buf));
@@ -1104,7 +938,7 @@ static void rt5514_schedule_copy(struct rt5514_dsp *rt5514_dsp,
 		/* switch to off before next spi schedule start*/
 		rt5514_spi_request_switch(SPI_SWITCH_MASK_COPY, 0);
 
-		if (mode == RT5514_MODE_ADC)
+		if (is_adc)
 			schedule_delayed_work(&rt5514_dsp->copy_work_2,
 				msecs_to_jiffies(0));
 		else if (stream_flag == RT5514_DSP_STREAM_HOTWORD)
@@ -1113,14 +947,6 @@ static void rt5514_schedule_copy(struct rt5514_dsp *rt5514_dsp,
 		else if (stream_flag == RT5514_DSP_STREAM_MUSDET)
 			schedule_delayed_work(&rt5514_dsp->copy_work_1,
 				msecs_to_jiffies(0));
-		else if (stream_flag == RT5514_DSP_STREAM_ZLATENCY) {
-			/* ignore dsp buffer if dsp buffer is not ready */
-			if (rt5514_buffer_status_cb &&
-			    !rt5514_buffer_status_cb())
-				rt5514_dsp->buf_size[3] = 0;
-			schedule_delayed_work(&rt5514_dsp->copy_work_3,
-					      msecs_to_jiffies(0));
-		}
 		return;
 	}
 end:
@@ -1152,7 +978,7 @@ static void rt5514_spi_start_work(struct work_struct *work)
 	}
 	mutex_unlock(&rt5514_dsp->dma_lock);
 
-	rt5514_schedule_copy(rt5514_dsp, RT5514_MODE_IRQ);
+	rt5514_schedule_copy(rt5514_dsp, false);
 }
 
 static void rt5514_spi_adc_start(struct work_struct *work)
@@ -1169,24 +995,7 @@ static void rt5514_spi_adc_start(struct work_struct *work)
 	mutex_unlock(&rt5514_dsp->dma_lock);
 
 	if (!snd_power_wait(component->card->snd_card, SNDRV_CTL_POWER_D0))
-		rt5514_schedule_copy(rt5514_dsp, RT5514_MODE_ADC);
-}
-
-static void rt5514_spi_zlatency_start(struct work_struct *work)
-{
-	struct rt5514_dsp *rt5514_dsp =
-		container_of(work, struct rt5514_dsp, zlatency_work.work);
-	struct snd_soc_component *component = rt5514_dsp->component;
-
-	mutex_lock(&rt5514_dsp->dma_lock);
-	if (!(rt5514_dsp->substream[3] && rt5514_dsp->substream[3]->pcm)) {
-		mutex_unlock(&rt5514_dsp->dma_lock);
-		return;
-	}
-	mutex_unlock(&rt5514_dsp->dma_lock);
-
-	if (!snd_power_wait(component->card->snd_card, SNDRV_CTL_POWER_D0))
-		rt5514_schedule_copy(rt5514_dsp, RT5514_MODE_ZLATENCY);
+		rt5514_schedule_copy(rt5514_dsp, true);
 }
 
 static irqreturn_t rt5514_spi_irq(int irq, void *data)
@@ -1226,9 +1035,8 @@ static int rt5514_spi_hw_params(struct snd_pcm_substream *substream,
 	struct rt5514_dsp *rt5514_dsp =
 		snd_soc_component_get_drvdata(component);
 	int ret;
-	int delay = 0;
 
-	if (cpu_dai->id >= RT5514_ID_MAX)
+	if (cpu_dai->id > 2)
 		return 0;
 
 	mutex_lock(&rt5514_dsp->dma_lock);
@@ -1237,19 +1045,9 @@ static int rt5514_spi_hw_params(struct snd_pcm_substream *substream,
 	rt5514_dsp->substream[cpu_dai->id] = substream;
 	rt5514_dsp->dma_offset[cpu_dai->id] = 0;
 
-	if (cpu_dai->id == RT5514_ID_ADC)
+	if (cpu_dai->id == 2)
 		schedule_delayed_work(&rt5514_dsp->adc_work,
 			msecs_to_jiffies(0));
-
-	if (cpu_dai->id == RT5514_ID_ZLATENCY) {
-		/* add latency if DSP buffer is not ready */
-		if (rt5514_buffer_status_cb && !rt5514_buffer_status_cb() &&
-		    rt5514_zlatency_cb) {
-			delay = rt5514_zlatency_cb();
-		}
-		schedule_delayed_work(&rt5514_dsp->zlatency_work,
-				      msecs_to_jiffies(delay));
-	}
 
 	mutex_unlock(&rt5514_dsp->dma_lock);
 
@@ -1265,7 +1063,7 @@ static int rt5514_spi_hw_free(struct snd_pcm_substream *substream)
 	struct rt5514_dsp *rt5514_dsp =
 		snd_soc_component_get_drvdata(component);
 
-	if (cpu_dai->id >= RT5514_ID_MAX)
+	if (cpu_dai->id > 2)
 		return 0;
 
 	mutex_lock(&rt5514_dsp->dma_lock);
@@ -1273,21 +1071,15 @@ static int rt5514_spi_hw_free(struct snd_pcm_substream *substream)
 	mutex_unlock(&rt5514_dsp->dma_lock);
 
 	switch (cpu_dai->id) {
-	case RT5514_ID_MUSDET:
+	case 1:
 		cancel_delayed_work_sync(&rt5514_dsp->copy_work_1);
 		rt5514_spi_request_switch(SPI_SWITCH_MASK_WORK_1, 0);
 		break;
 
-	case RT5514_ID_ADC:
+	case 2:
 		dev_info(rt5514_dsp->dev, "adc stream turns off\n");
 		cancel_delayed_work_sync(&rt5514_dsp->copy_work_2);
 		rt5514_spi_request_switch(SPI_SWITCH_MASK_WORK_2, 0);
-		break;
-
-	case RT5514_ID_ZLATENCY:
-		dev_info(rt5514_dsp->dev, "zlatency stream turns off\n");
-		cancel_delayed_work_sync(&rt5514_dsp->copy_work_3);
-		rt5514_spi_request_switch(SPI_SWITCH_MASK_WORK_3, 0);
 		break;
 
 	default:
@@ -1375,11 +1167,8 @@ static int rt5514_spi_pcm_probe(struct snd_soc_component *component)
 	INIT_DELAYED_WORK(&rt5514_dsp->copy_work_0, rt5514_spi_copy_work_0);
 	INIT_DELAYED_WORK(&rt5514_dsp->copy_work_1, rt5514_spi_copy_work_1);
 	INIT_DELAYED_WORK(&rt5514_dsp->copy_work_2, rt5514_spi_copy_work_2);
-	INIT_DELAYED_WORK(&rt5514_dsp->copy_work_3, rt5514_spi_copy_work_3);
 	INIT_DELAYED_WORK(&rt5514_dsp->start_work, rt5514_spi_start_work);
 	INIT_DELAYED_WORK(&rt5514_dsp->adc_work, rt5514_spi_adc_start);
-	INIT_DELAYED_WORK(&rt5514_dsp->zlatency_work,
-			  rt5514_spi_zlatency_start);
 	snd_soc_component_set_drvdata(component, rt5514_dsp);
 
 	if (rt5514_spi->irq) {
@@ -1396,11 +1185,9 @@ static int rt5514_spi_pcm_probe(struct snd_soc_component *component)
 	snd_soc_dapm_ignore_suspend(dapm, "SoundTrigger Capture");
 	snd_soc_dapm_ignore_suspend(dapm, "SoundTrigger Capture 2");
 	snd_soc_dapm_ignore_suspend(dapm, "ADC Capture");
-	snd_soc_dapm_ignore_suspend(dapm, "ZLatency Capture");
 	snd_soc_dapm_ignore_suspend(dapm, "SPI Capture");
 	snd_soc_dapm_ignore_suspend(dapm, "SPI Capture 2");
 	snd_soc_dapm_ignore_suspend(dapm, "SPI Capture 3");
-	snd_soc_dapm_ignore_suspend(dapm, "SPI Capture 4");
 	snd_soc_dapm_ignore_suspend(dapm, "DSP_IN1");
 	snd_soc_dapm_ignore_suspend(dapm, "DSP_IN2");
 	snd_soc_dapm_ignore_suspend(dapm, "DSP_IN3");

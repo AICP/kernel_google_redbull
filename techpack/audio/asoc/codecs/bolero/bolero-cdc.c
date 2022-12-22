@@ -232,24 +232,6 @@ static int bolero_cdc_update_wcd_event(void *handle, u16 event, u32 data)
 				priv->component,
 				BOLERO_MACRO_EVT_BCS_CLK_OFF, data);
 		break;
-	case WCD_BOLERO_EVT_RX_PA_GAIN_UPDATE:
-		if (priv->macro_params[RX_MACRO].event_handler)
-			priv->macro_params[RX_MACRO].event_handler(
-				priv->component,
-				BOLERO_MACRO_EVT_RX_PA_GAIN_UPDATE, data);
-		break;
-	case WCD_BOLERO_EVT_HPHL_HD2_ENABLE:
-		if (priv->macro_params[RX_MACRO].event_handler)
-			priv->macro_params[RX_MACRO].event_handler(
-				priv->component,
-				BOLERO_MACRO_EVT_HPHL_HD2_ENABLE, data);
-		break;
-	case WCD_BOLERO_EVT_HPHR_HD2_ENABLE:
-		if (priv->macro_params[RX_MACRO].event_handler)
-			priv->macro_params[RX_MACRO].event_handler(
-				priv->component,
-				BOLERO_MACRO_EVT_HPHR_HD2_ENABLE, data);
-		break;
 	default:
 		dev_err(priv->dev, "%s: Invalid event %d trigger from wcd\n",
 			__func__, event);
@@ -618,28 +600,6 @@ int bolero_dmic_clk_enable(struct snd_soc_component *component,
 }
 EXPORT_SYMBOL(bolero_dmic_clk_enable);
 
-bool bolero_is_va_macro_registered(struct device *dev)
-{
-	struct bolero_priv *priv;
-
-	if (!dev) {
-		pr_err("%s: dev is null\n", __func__);
-		return false;
-	}
-	if (!bolero_is_valid_child_dev(dev)) {
-		dev_err(dev, "%s: child device calling is not added yet\n",
-			__func__);
-		return false;
-	}
-	priv = dev_get_drvdata(dev->parent);
-	if (!priv) {
-		dev_err(dev, "%s: priv is null\n", __func__);
-		return false;
-	}
-	return priv->macros_supported[VA_MACRO];
-}
-EXPORT_SYMBOL(bolero_is_va_macro_registered);
-
 /**
  * bolero_register_macro - Registers macro to bolero
  *
@@ -701,7 +661,7 @@ int bolero_register_macro(struct device *dev, u16 macro_id,
 	priv->num_macros_registered++;
 	priv->macros_supported[macro_id] = true;
 
-	dev_info(dev, "%s: register macro successful:%d\n", __func__, macro_id);
+	dev_dbg(dev, "%s: register macro successful:%d\n", __func__, macro_id);
 
 	if (priv->num_macros_registered == priv->num_macros) {
 		ret = bolero_copy_dais_from_macro(priv);
@@ -775,7 +735,7 @@ void bolero_unregister_macro(struct device *dev, u16 macro_id)
 }
 EXPORT_SYMBOL(bolero_unregister_macro);
 
-void bolero_wsa_pa_on(struct device *dev, bool adie_lb)
+void bolero_wsa_pa_on(struct device *dev)
 {
 	struct bolero_priv *priv;
 
@@ -793,12 +753,8 @@ void bolero_wsa_pa_on(struct device *dev, bool adie_lb)
 		dev_err(dev, "%s: priv is null\n", __func__);
 		return;
 	}
-	if (adie_lb)
-		bolero_cdc_notifier_call(priv,
-			BOLERO_WCD_EVT_PA_ON_POST_FSCLK_ADIE_LB);
-	else
-		bolero_cdc_notifier_call(priv,
-			BOLERO_WCD_EVT_PA_ON_POST_FSCLK);
+
+	bolero_cdc_notifier_call(priv, BOLERO_WCD_EVT_PA_ON_POST_FSCLK);
 }
 EXPORT_SYMBOL(bolero_wsa_pa_on);
 
@@ -1130,7 +1086,7 @@ EXPORT_SYMBOL(bolero_tx_mclk_enable);
  * Returns 0 on success or -EINVAL on error.
  */
 int bolero_register_event_listener(struct snd_soc_component *component,
-				   bool enable)
+				   bool enable, bool is_dmic_sva)
 {
 	struct bolero_priv *priv = NULL;
 	int ret = 0;
@@ -1149,7 +1105,8 @@ int bolero_register_event_listener(struct snd_soc_component *component,
 
 	if (priv->macro_params[TX_MACRO].reg_evt_listener)
 		ret = priv->macro_params[TX_MACRO].reg_evt_listener(component,
-								    enable);
+								    enable,
+								    is_dmic_sva);
 
 	return ret;
 }
@@ -1379,6 +1336,7 @@ static int bolero_probe(struct platform_device *pdev)
 	mutex_init(&priv->vote_lock);
 	INIT_WORK(&priv->bolero_add_child_devices_work,
 		  bolero_add_child_devices);
+	schedule_work(&priv->bolero_add_child_devices_work);
 
 	/* Register LPASS core hw vote */
 	lpass_core_hw_vote = devm_clk_get(&pdev->dev, "lpass_core_hw_vote");
@@ -1402,7 +1360,6 @@ static int bolero_probe(struct platform_device *pdev)
 	}
 	priv->lpass_audio_hw_vote = lpass_audio_hw_vote;
 
-	schedule_work(&priv->bolero_add_child_devices_work);
 	return 0;
 }
 

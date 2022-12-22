@@ -21,6 +21,7 @@
 #define pr_fmt(fmt)	"arm-lpae io-pgtable: " fmt
 
 #include <linux/atomic.h>
+#include <linux/io-pgtable.h>
 #include <linux/iommu.h>
 #include <linux/io-pgtable.h>
 #include <linux/kernel.h>

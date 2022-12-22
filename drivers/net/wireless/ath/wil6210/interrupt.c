@@ -1,7 +1,19 @@
 // SPDX-License-Identifier: ISC
 /*
  * Copyright (c) 2012-2017 Qualcomm Atheros, Inc.
- * Copyright (c) 2018-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
+ *
+ * Permission to use, copy, modify, and/or distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
 #include <linux/interrupt.h>
@@ -286,36 +298,6 @@ void wil_configure_interrupt_moderation(struct wil6210_priv *wil)
 	      BIT_DMA_ITR_RX_IDL_CNT_CTL_EXT_TIC_SEL);
 }
 
-static inline void write_rx_intr_cnt(struct wil6210_priv *wil)
-{
-	if (wil_tx_latency_threshold_enabled(wil))
-		wil_w(wil,
-		      wil->tx_latency_threshold_base +
-			      offsetof(struct wil_tx_latency_threshold_info,
-				       rx_intr_cnt),
-		      ++wil->tx_latency_threshold_info.rx_intr_cnt);
-}
-
-static inline void write_tx_intr_cnt(struct wil6210_priv *wil)
-{
-	if (wil_tx_latency_threshold_enabled(wil))
-		wil_w(wil,
-		      wil->tx_latency_threshold_base +
-			      offsetof(struct wil_tx_latency_threshold_info,
-				       tx_intr_cnt),
-		      ++wil->tx_latency_threshold_info.tx_intr_cnt);
-}
-
-static inline void write_hard_irq_cnt(struct wil6210_priv *wil)
-{
-	if (wil_tx_latency_threshold_enabled(wil))
-		wil_w(wil,
-		      wil->tx_latency_threshold_base +
-			      offsetof(struct wil_tx_latency_threshold_info,
-				       hard_irq_cnt),
-		      ++wil->tx_latency_threshold_info.hard_irq_cnt);
-}
-
 static irqreturn_t wil6210_irq_rx(int irq, void *cookie)
 {
 	struct wil6210_priv *wil = cookie;
@@ -330,7 +312,6 @@ static irqreturn_t wil6210_irq_rx(int irq, void *cookie)
 
 	trace_wil6210_irq_rx(isr);
 	wil_dbg_irq(wil, "ISR RX 0x%08x\n", isr);
-	write_rx_intr_cnt(wil);
 
 	if (unlikely(!isr)) {
 		wil_err_ratelimited(wil, "spurious IRQ: RX\n");
@@ -393,7 +374,6 @@ static irqreturn_t wil6210_irq_rx_edma(int irq, void *cookie)
 
 	trace_wil6210_irq_rx(isr);
 	wil_dbg_irq(wil, "ISR RX 0x%08x\n", isr);
-	write_rx_intr_cnt(wil);
 
 	if (unlikely(!isr)) {
 		wil_err(wil, "spurious IRQ: RX\n");
@@ -445,7 +425,6 @@ static irqreturn_t wil6210_irq_tx_edma(int irq, void *cookie)
 
 	trace_wil6210_irq_tx(isr);
 	wil_dbg_irq(wil, "ISR TX 0x%08x\n", isr);
-	write_tx_intr_cnt(wil);
 
 	if (unlikely(!isr)) {
 		wil_err(wil, "spurious IRQ: TX\n");
@@ -492,7 +471,6 @@ static irqreturn_t wil6210_irq_tx(int irq, void *cookie)
 
 	trace_wil6210_irq_tx(isr);
 	wil_dbg_irq(wil, "ISR TX 0x%08x\n", isr);
-	write_tx_intr_cnt(wil);
 
 	if (unlikely(!isr)) {
 		wil_err_ratelimited(wil, "spurious IRQ: TX\n");
@@ -789,8 +767,6 @@ static irqreturn_t wil6210_hardirq(int irq, void *cookie)
 	irqreturn_t rc = IRQ_HANDLED;
 	struct wil6210_priv *wil = cookie;
 	u32 pseudo_cause = wil_r(wil, RGF_DMA_PSEUDO_CAUSE);
-
-	write_hard_irq_cnt(wil);
 
 	/**
 	 * pseudo_cause is Clear-On-Read, no need to ACK
