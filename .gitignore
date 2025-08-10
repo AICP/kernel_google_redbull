@@ -82,6 +82,7 @@ modules.builtin
 # git files that we don't want to ignore even if they are dot-files
 #
 !.gitignore
+!.gitupstream
 !.mailmap
 !.cocciconfig
 !.clang-format
@@ -114,7 +115,6 @@ GTAGS
 # id-utils files
 ID
 
-*.orig
 *~
 \#*#
 
