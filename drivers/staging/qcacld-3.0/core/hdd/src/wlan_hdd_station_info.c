@@ -350,7 +350,7 @@ static int32_t hdd_add_tx_bitrate(struct sk_buff *skb,
 	struct nlattr *nla_attr;
 	uint32_t bitrate, bitrate_compat;
 
-	nla_attr = nla_nest_start(skb, idx);
+	nla_attr = nla_nest_start_noflag(skb, idx);
 	if (!nla_attr) {
 		hdd_err("nla_nest_start failed");
 		goto fail;
@@ -466,7 +466,7 @@ static int32_t hdd_add_sta_info(struct sk_buff *skb,
 		goto fail;
 	}
 
-	nla_attr = nla_nest_start(skb, idx);
+	nla_attr = nla_nest_start_noflag(skb, idx);
 	if (!nla_attr) {
 		hdd_err("nla_nest_start failed");
 		goto fail;
@@ -505,7 +505,7 @@ static int32_t hdd_add_survey_info(struct sk_buff *skb,
 {
 	struct nlattr *nla_attr;
 
-	nla_attr = nla_nest_start(skb, idx);
+	nla_attr = nla_nest_start_noflag(skb, idx);
 	if (!nla_attr)
 		goto fail;
 	if (nla_put_u32(skb, NL80211_SURVEY_INFO_FREQUENCY,
@@ -543,7 +543,7 @@ hdd_add_link_standard_info(struct sk_buff *skb,
 		goto fail;
 	}
 
-	nla_attr = nla_nest_start(skb, idx);
+	nla_attr = nla_nest_start_noflag(skb, idx);
 	if (!nla_attr) {
 		hdd_err("nla_nest_start failed");
 		goto fail;
@@ -590,7 +590,7 @@ hdd_add_ap_standard_info(struct sk_buff *skb,
 {
 	struct nlattr *nla_attr;
 
-	nla_attr = nla_nest_start(skb, idx);
+	nla_attr = nla_nest_start_noflag(skb, idx);
 	if (!nla_attr)
 		goto fail;
 	if (hdd_sta_ctx->cache_conn_info.conn_flag.vht_present)
@@ -786,7 +786,7 @@ static int32_t hdd_add_survey_info_sap(struct sk_buff *skb,
 {
 	struct nlattr *nla_attr;
 
-	nla_attr = nla_nest_start(skb, idx);
+	nla_attr = nla_nest_start_noflag(skb, idx);
 	if (!nla_attr)
 		goto fail;
 	if (nla_put_u32(skb, NL80211_SURVEY_INFO_FREQUENCY,
@@ -834,7 +834,7 @@ static int hdd_add_tx_bitrate_sap(struct sk_buff *skb,
 {
 	struct nlattr *nla_attr;
 
-	nla_attr = nla_nest_start(skb, idx);
+	nla_attr = nla_nest_start_noflag(skb, idx);
 	if (!nla_attr)
 		goto fail;
 
@@ -879,7 +879,7 @@ static int32_t hdd_add_sta_info_sap(struct sk_buff *skb, int8_t rssi,
 {
 	struct nlattr *nla_attr;
 
-	nla_attr = nla_nest_start(skb, idx);
+	nla_attr = nla_nest_start_noflag(skb, idx);
 	if (!nla_attr)
 		goto fail;
 
@@ -930,7 +930,7 @@ static int hdd_add_link_standard_info_sap(struct sk_buff *skb, int8_t rssi,
 {
 	struct nlattr *nla_attr;
 
-	nla_attr = nla_nest_start(skb, idx);
+	nla_attr = nla_nest_start_noflag(skb, idx);
 	if (!nla_attr)
 		goto fail;
 	if (hdd_add_survey_info_sap(skb, stainfo, NL80211_ATTR_SURVEY_INFO))
@@ -993,7 +993,7 @@ static int hdd_add_ap_standard_info_sap(struct sk_buff *skb,
 {
 	struct nlattr *nla_attr;
 
-	nla_attr = nla_nest_start(skb, idx);
+	nla_attr = nla_nest_start_noflag(skb, idx);
 	if (!nla_attr)
 		goto fail;
 
@@ -1371,7 +1371,7 @@ static int hdd_get_connected_station_info(struct hdd_context *hdd_ctx,
 			goto fail;
 		}
 
-		attr = nla_nest_start(skb, REMOTE_AVG_RSSI_PER_CHAIN);
+		attr = nla_nest_start_noflag(skb, REMOTE_AVG_RSSI_PER_CHAIN);
 		if (!attr)
 			goto fail;
 		for (i = 0; i < WMI_MAX_CHAINS; i++) {

@@ -591,7 +591,7 @@ static void smaps_pte_entry(pte_t *pte, unsigned long addr,
 		if (!page)
 			return;
 
-		if (radix_tree_exceptional_entry(page))
+		if (xa_is_value(page))
 			mss->swap += PAGE_SIZE;
 		else
 			put_page(page);
@@ -653,7 +653,7 @@ static int smaps_pte_range(pmd_t *pmd, unsigned long addr, unsigned long end,
 	if (pmd_trans_unstable(pmd))
 		goto out;
 	/*
-	 * The mmap_sem held all the way back in m_start() is what
+	 * The mmap_lock held all the way back in m_start() is what
 	 * keeps khugepaged out of here and from collapsing things
 	 * in here.
 	 */
@@ -809,7 +809,7 @@ static void smap_gather_stats(struct vm_area_struct *vma,
 		}
 	}
 #endif
-	/* mmap_sem is held in m_start */
+	/* mmap_lock is held in m_start */
 	walk_page_vma(vma, &smaps_walk);
 }
 
@@ -1738,7 +1738,7 @@ static int reclaim_pte_range(pmd_t *pmd, unsigned long addr,
 	struct mm_struct *mm = vma->vm_mm;
 
 	/* Abort operation if there any any process want to act on the mm */
-	if (rwsem_is_contended(&mm->mmap_sem))
+	if (rwsem_is_contended(&mm->mmap_lock))
 		return -EINTR;
 
 	orig_pte = pte_offset_map_lock(vma->vm_mm, pmd, addr, &ptl);
@@ -2086,7 +2086,7 @@ static int show_numa_map(struct seq_file *m, void *v)
 	if (is_vm_hugetlb_page(vma))
 		seq_puts(m, " huge");
 
-	/* mmap_sem is held by m_start */
+	/* mmap_lock is held by m_start */
 	walk_page_vma(vma, &walk);
 
 	if (!md->pages)
